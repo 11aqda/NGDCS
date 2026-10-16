@@ -165,31 +165,48 @@ TCP 服务端本来就知道每个玩家到达了第几关、得了多少分
 {
   "total": 137,
   "entries": [
-    { "rank": 1, "username": "anria",    "best_phase": 12, "best_survive_seconds": 421 },
-    { "rank": 2, "username": "眉姨阁诗人", "best_phase": 11, "best_survive_seconds": 388 }
+    { "rank": 1, "username": "anria",     "best_score": 8420, "max_level": 2, "games": 37 },
+    { "rank": 2, "username": "眉姨阁诗人", "best_score": 7135, "max_level": 2, "games": 22 }
   ]
 }
 ```
 
+**字段说明**
+
+| 字段 | 含义 |
+|---|---|
+| `best_score` | **单局最高分**（击杀敌机 + 满级道具转化的分数） |
+| `max_level` | 到达过的最高关卡（1 或 2） |
+| `games` | 累计游戏局数 |
+
+> **注意**：分数完全来自**服务端**。TCP 服务端在结算时直接算好并写入数据库，
+> 客户端**没有任何上报接口**（`/api/scores` 已取消，见 §3.1）。
+
 **缓存策略**
 
 ```
-读请求 → 查 Redis ZSET "lb:best_phase"
-           ├─ 命中 → 直接组装返回
+读请求 → 查 Redis ZSET "lb:best_score"
+           ├─ 命中 → 取 top N 的 user_id，再批量查用户名
            └─ 未命中 → 查 MySQL 重建 ZSET → 再读
 ```
 
 | 项 | 值 |
 |---|---|
 | Redis 结构 | `ZSET` |
-| key | `lb:best_phase` |
+| key | `lb:best_score` |
 | member | `user_id` |
-| score | `best_phase` |
-| TTL | 无（写成绩时增量更新，不做整体过期） |
+| score | `best_score` |
+| 更新时机 | **TCP 服务端**在一局结束时 `ZADD GT`（只在更高分时更新） |
+| TTL | 无（增量更新，不做整体过期） |
 
 ---
 
-### 4.5 `GET /api/profile`
+### 4.5 ~~`GET /api/profile`~~ ❌ 已取消
+
+> ⚠️ **本节内容基于已废弃的「缩圈」设计，字段（`best_phase` / `survive_seconds`）**全部过时**。
+> 仅作设计思路记录，**不要参考、不要实现**。排行榜的最终字段见 §4.4。**
+>
+> 同下方 §4.6 一并作废，原因是接口砍到 2 组（见 §3）且游戏形态已改为飞机大战。
 
 **请求头**：`Authorization: Token <token>`
 
@@ -213,7 +230,10 @@ TCP 服务端本来就知道每个玩家到达了第几关、得了多少分
 
 ---
 
-### 4.6 `POST /api/scores`
+### 4.6 ~~`POST /api/scores`~~ ❌ 已取消
+
+> ⚠️ **本接口已取消**（见 §3.1）。成绩改由 **TCP 服务端直接写入数据库**，客户端不参与。
+> 下方内容基于已废弃的「缩圈」设计，**不要实现**。最终方案见 §7.1。
 
 **请求头**：`Authorization: Token <token>`
 
@@ -262,28 +282,29 @@ TCP 服务端本来就知道每个玩家到达了第几关、得了多少分
 
 -- 玩家档案（汇总数据）
 CREATE TABLE player_profile (
-    id                   BIGINT   PRIMARY KEY AUTO_INCREMENT,
-    user_id              INT      NOT NULL UNIQUE,
-    nickname             VARCHAR(32),
-    best_phase           SMALLINT NOT NULL DEFAULT 0,
-    best_survive_seconds INT      NOT NULL DEFAULT 0,
-    total_games          INT      NOT NULL DEFAULT 0,
-    total_survive_seconds BIGINT  NOT NULL DEFAULT 0,
-    created_at           DATETIME NOT NULL,
-    last_played_at       DATETIME,
+    id            BIGINT   PRIMARY KEY AUTO_INCREMENT,
+    user_id       INT      NOT NULL UNIQUE,
+    nickname      VARCHAR(32),
+    best_score    INT      NOT NULL DEFAULT 0,      -- 单局最高分
+    max_level     TINYINT  NOT NULL DEFAULT 0,      -- 到达过的最高关卡 (1~2)
+    total_games   INT      NOT NULL DEFAULT 0,
+    total_score   BIGINT   NOT NULL DEFAULT 0,      -- 累计总分
+    created_at    DATETIME NOT NULL,
+    last_played_at DATETIME,
     FOREIGN KEY (user_id) REFERENCES auth_user(id)
 );
 
--- 每局成绩明细
+-- 每局成绩明细（由 TCP 服务端在结算时写入，客户端不参与）
 CREATE TABLE score_record (
-    id              BIGINT   PRIMARY KEY AUTO_INCREMENT,
-    user_id         INT      NOT NULL,
-    max_phase       SMALLINT NOT NULL,
-    survive_seconds INT      NOT NULL,
-    room_code       VARCHAR(8),
-    played_at       DATETIME NOT NULL,
+    id          BIGINT   PRIMARY KEY AUTO_INCREMENT,
+    user_id     INT      NOT NULL,
+    score       INT      NOT NULL,                  -- 本局得分
+    max_level   TINYINT  NOT NULL,                  -- 本局到达的关卡
+    boss_killed TINYINT  NOT NULL DEFAULT 0,        -- 是否击败 BOSS
+    room_code   VARCHAR(8),
+    played_at   DATETIME NOT NULL,
     INDEX idx_user_played (user_id, played_at DESC),
-    INDEX idx_phase (max_phase DESC),
+    INDEX idx_score (score DESC),
     FOREIGN KEY (user_id) REFERENCES auth_user(id)
 );
 ```
@@ -294,10 +315,31 @@ CREATE TABLE score_record (
 
 | 用途 | 结构 | key | 说明 |
 |---|---|---|---|
-| 排行榜 | ZSET | `lb:best_phase` | member=user_id, score=best_phase |
+| 排行榜 | ZSET | `lb:best_score` | member=user_id, score=best_score |
 | 档案缓存（可选） | HASH | `profile:{user_id}` | 减少高频读取的数据库压力 |
 
 **为什么用 Redis 做排行榜**：ZSET 的 `ZREVRANGE` 是 O(log N)，比 MySQL 的 `ORDER BY ... LIMIT` 快得多，且能天然处理并列排名。**这正是 Redis 在本项目中的价值所在**，也是 `01-系统架构.md` 里把它列入技术栈的理由。
+
+### 5.3 ⚠️ 谁写数据库？（重要）
+
+```
+一局结束（全员阵亡）
+      ↓
+TCP 服务端（asyncio 进程）
+      ├─ 算出每个玩家的最终分数（服务端权威，客户端无法伪造）
+      ├─ 写入 MySQL 的 score_record 表
+      ├─ 更新 player_profile（best_score / max_level / total_games）
+      └─ ZADD GT lb:best_score <分数> <user_id>
+      ↓
+Django 只负责【读】：GET /api/leaderboard
+```
+
+> **TCP 服务端直接访问 MySQL / Redis**，不经过 Django。
+> 这是刻意的设计：**写入路径不能依赖 HTTP 层**，否则网络异常时会丢成绩。
+>
+> ⚠️ 实现时注意：**asyncio 进程里不要用阻塞式数据库驱动**。
+> 用 `pymysql` 时需放到线程池（`asyncio.to_thread`），或改用异步驱动。
+> → 这一点要记入 `DECISIONS.md`。
 
 ---
 
@@ -309,7 +351,7 @@ CREATE TABLE score_record (
 |---|---|---|
 | 登录 / 注册 | ❌ 在登录界面 | 直接同步调用即可 |
 | 拉取排行榜 | ❌ 在排行榜界面 | 直接同步调用即可 |
-| 上报成绩 | ❌ 在结算界面 | 直接同步调用即可 |
+| 结算展示 | ❌ 在结算界面 | 分数由服务端推送，**客户端不调用接口** |
 
 **结论：所有 HTTP 调用都发生在游戏循环之外，天然不存在阻塞问题。**
 
@@ -336,25 +378,45 @@ requests 2.34.2   ← 已安装
 | 认证 | Token（40 字节随机串） | 存于 `authtoken_token` 表 |
 | SQL 注入 | Django ORM 参数化查询 | 天然免疫 |
 | 限流 | DRF `Throttle` | 重点保护 `/api/scores` 与 `/api/auth/login` |
-| 成绩伪造 | ⚠️ **当前无法防** | 客户端直接上报 `max_phase`，可被篡改 |
+| 成绩伪造 | ✅ **已根治** | 取消客户端上报，**服务端直接写分**（见 §7.1） |
 
-### 7.1 关于成绩伪造（论文中要诚实讨论）
+### 7.1 关于成绩伪造（**已解决**）
 
-**问题**：`POST /api/scores` 信任客户端上报的数值，改一下请求就能刷榜。
+**原问题**：`POST /api/scores` 信任客户端上报的数值，改一下请求就能刷榜。
 
-**可选缓解措施**（按成本排序）：
+**最终方案**：**取消该接口，改由 TCP 服务端直接写分。**
 
-| 措施 | 成本 | 效果 |
+```
+一局结束（全员阵亡）
+      ↓
+TCP 服务端算出每个玩家的最终分数
+      ↓
+直接写入 MySQL + Redis
+      ↓
+客户端全程不参与
+```
+
+**为什么这样能根治**：
+
+| 原因 | 说明 |
+|---|---|
+| 分数由服务端计算 | 击杀、道具、关卡进度全部是服务端权威的结果 |
+| 客户端没有上报入口 | 连伪造的机会都没有 |
+| 与游戏状态同一套权威 | 不需要额外的校验机制 |
+
+> **论文论点**：**服务端权威不仅用于游戏状态，也用于成绩记录。**
+> 这是一个「架构决策如何顺带消除一类安全问题」的典型案例 ——
+> 不是加防护，而是**让漏洞没有存在的空间**。
+
+**对比曾经的备选方案**：
+
+| 方案 | 成本 | 效果 |
 |---|---|---|
-| 服务端记录对局过程，结算时由服务端上报 | 中 | ✅ 根治 |
-| 对局开始/结束时服务端各记一次，校验时长合理性 | 低 | 🟡 挡掉明显异常值 |
-| 限制上报频率 + 数值上限 | 极低 | 🟡 挡掉脚本刷榜 |
+| **服务端直接写分** ⭐ | 低（本来就该这么做） | ✅ **根治** |
+| 校验上报值的合理性 | 中 | 🟡 只能挡明显异常 |
+| 限制上报频率 | 低 | 🟡 只能挡脚本刷榜 |
 
-**建议**：采用第二项（服务端侧记录 `max_phase`，不信任客户端上报值）——
-TCP 服务端本来就知道每个玩家到达了第几阶段，**结算时直接由服务端写入，客户端根本不参与**。
-
-> 这样 `/api/scores` 可以取消，改为**服务端内部调用**。
-> 这本身就是论文里一个很好的论点：**服务端权威不仅用于游戏状态，也用于成绩记录。**
+> ⚠️ **实现注意**：服务端写数据库时**不能阻塞 asyncio 事件循环**，见 D-014。
 
 ---
 
