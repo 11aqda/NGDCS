@@ -22,6 +22,8 @@
 
 ## 1. 关键路径速查（新会话必看）
 
+### 1.1 路径
+
 | 用途 | 路径 |
 |---|---|
 | 项目根目录 | `E:\PythonProject` |
@@ -37,6 +39,61 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install <包名> -i https://pyp
 ```
 
 **venv 无法用 `Activate.ps1` 激活**（ExecutionPolicy 限制），一律直接调用上面的解释器全路径。
+
+### 1.2 环境清单（⭐ **权威** —— 若其他章节与本节冲突，以本节为准）
+
+#### ✅ 已就绪
+
+| 类别 | 项 | 版本 / 状态 |
+|---|---|---|
+| 语言 | Python | 3.13.3（系统 + venv） |
+| 版本控制 | Git | 2.47.1.windows.2 |
+| 数据库 | MySQL Server | 8.0.41，服务 `MySQL80` **运行中** |
+| 数据库 | 库 `myproject` + 用户 `django_user` | 已建（utf8mb4 / utf8mb4_unicode_ci） |
+| 缓存 | Redis 服务端 | 5.0.14.1，已解压到 `D:\Tools\Redis`（**未启动**） |
+| 接口调试 | Apifox | 2.8.50，已装于 `D:\Apps\Apifox` |
+| 仓库 | Git | `master` 分支，已提交 7 次 |
+
+**venv 已装 16 个包：**
+```
+asgiref 3.12.1 · certifi · cffi 2.1.1 · charset-normalizer 3.5.1 · cryptography 50.0.2
+Django 5.2.18 · idna 3.20 · pip 26.2.1 · pycparser 3.11 · pygame 2.6.1
+PyMySQL 1.2.3 · redis 8.1.0 · requests 2.34.2 · sqlparse 0.6.0 · tzdata 2026.5 · urllib3 2.8.0
+```
+
+#### ❌ 待安装
+
+| 项 | 用途 | 优先级 | 装法 |
+|---|---|---|---|
+| **Wireshark** | 抓包验证（毕设必备） | 🔴 必须 | **图形界面，需手动安装** |
+| `matplotlib` | 论文出 16 张图 | 🔴 必须 | pip |
+| `psutil` | 实验采集 CPU / 内存 | 🔴 必须 | pip |
+| `djangorestframework` | HTTP 接口层（D-005） | 🔴 必须 | pip |
+| `pytest` | 单元测试（粘包拆包必测） | 🟡 建议 | pip（也可用标准库 `unittest` 免装） |
+| `numpy` | 实体数多时提性能 | ⚪ 按需 | pip（**当前玩法实体少，暂不需要**） |
+
+**一键安装命令：**
+```
+E:\PythonProject\.venv\Scripts\python.exe -m pip install matplotlib psutil djangorestframework pytest -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir --progress-bar off
+```
+
+#### ⚠️ 明确**不需要**的（避免以后误装）
+
+| 项 | 原因 |
+|---|---|
+| `django-redis` | 我们用 `redis` 包直接操作 ZSET，**不走 Django 缓存框架** |
+| `mysqlclient` | 已定用 PyMySQL（见 D-001） |
+| `pyinstaller` | 不打包分发 |
+| `pygame-menu` | 用几何绘制自绘 UI |
+| `clients` / `channels` | 实时数据走**自定义 TCP**，不用 WebSocket |
+
+#### 其他待办
+
+- [ ] **启动 Redis**（双击或命令行跑 `D:\Tools\Redis\redis-server.exe`，需手动，没设成服务）
+- [ ] 建 `requirements.txt`（把上面已装的 16 个包固化下来）
+- [ ] 建 `README.md`（怎么启动）
+- [ ] 建 `docs\BACKLOG.md`（其他文档引用了它，但还没建）
+- [ ] 把原飞机大战代码移入 `legacy_game\`
 
 ---
 
@@ -134,10 +191,13 @@ http_test.py    与游戏无关的 requests 测试
 
 ### 4.1 前置动作（动代码前）
 
+**依赖安装清单以 §1.2 为权威**，这里只列动作：
+
+- [ ] 装 `matplotlib` / `psutil` / `djangorestframework` / `pytest`（命令见 §1.2）
+- [ ] 安装 **Wireshark**（图形界面，手动装）
 - [ ] 把原飞机大战代码移入 `legacy_game\`（独立提交，便于回溯）
 - [ ] 建立 `requirements.txt` 与 `README.md`
-- [ ] 补齐缺失依赖：`numpy`、`matplotlib`
-- [ ] 安装 Wireshark
+- [ ] 建立 `docs\BACKLOG.md`
 
 ### 4.2 Django / HTTP 层（D-005 定为主线）
 
@@ -162,7 +222,7 @@ http_test.py    与游戏无关的 requests 测试
 - [x] ~~排行榜 / 关卡进度缺少数据来源~~ → **已解决**：采用缩圈关卡（D-008），`max_phase` 与 `survive_seconds` 即为成绩
 - [ ] **网络实验数据来源** —— 不装虚拟机、只用本机多进程，**必须在阶段 1 实测**「连本机局域网 IP」能否拿到真实 RTT 与抖动（见 `01-系统架构.md §9.2`、`03-实验清单.md §2.2`）
 - [ ] **成绩伪造** —— 建议取消客户端上报，改由服务端直接写分数（见 `04-API接口设计.md §7.1`）
-- [ ] 待装依赖：`djangorestframework`、`psutil`、`matplotlib`、Wireshark
+- [ ] 待装依赖与文件**见 §1.2 权威清单**（不要再在本节重复维护）
 
 ### 4.5 开工指南（⭐ 新会话务必先看这一节）
 
@@ -213,10 +273,8 @@ http_test.py    与游戏无关的 requests 测试
 
 ## 5. 待办 / 备忘
 
-- [ ] `requirements.txt` 还没建
-- [ ] `README.md`（怎么启动）还没建
-- [ ] 屏幕实体数变多后需要装 `numpy`（性能优化）
-- [ ] 需要装 `Wireshark`（毕设抓包必备）
+> 依赖与环境相关的一切，**统一看 §1.2**，本节不再重复。
+
 - [ ] 游戏画面走**几何极简风**（统一风格 + 加特效反馈），避免「廉价感」
 - [ ] 已知代码问题（暂不改，改造时一并处理）：
   - `enemy0.png` 是 20×15，被 `scale` 到 (30,30)，**比例失真**
