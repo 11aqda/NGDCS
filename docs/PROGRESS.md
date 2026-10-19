@@ -52,7 +52,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install <包名> -i https://pyp
 | 数据库 | 库 `myproject` + 用户 `django_user` | 已建（utf8mb4 / utf8mb4_unicode_ci） |
 | 缓存 | Redis 服务端 | 5.0.14.1，已解压到 `D:\Tools\Redis`（**未启动**） |
 | 接口调试 | Apifox | 2.8.50，已装于 `D:\Apps\Apifox` |
-| 仓库 | Git | `master` 分支，已提交 13 次 |
+| 仓库 | Git | `master` 分支，已提交 15 次 |
 
 **venv 已装 16 个包：**
 ```
@@ -137,7 +137,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install matplotlib psutil djang
 - 位置：`E:\PythonProject\.git`
 - 分支：`master`
 - 首次提交：`31f881d chore: 初始化仓库，加入 pygame 飞机游戏源码与素材`
-- 已跟踪 22 个文件（代码 + 文档 + 素材）
+- 已跟踪 29 个文件（代码 + 文档 + 素材）
 - 远端：无（纯本地）
 - `.gitignore` 内容：`.venv/`、`__pycache__/`、`.idea/`、`*.pyc`
 

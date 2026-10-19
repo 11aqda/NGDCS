@@ -1,14 +1,21 @@
-"""阶段 1 · 回声客户端：从标准输入读一行，发给服务器，再把回声打印出来。
+"""阶段 1 · 第 2 步：带长度前缀的回声客户端。
+
+和第 1 步的区别：
+    - 发送时先写 4 字节长度，再写载荷（send_frame）
+    - 接收时先读长度，再读满载荷（recv_frame）
+    所以一次 recv 只拿到半条消息也不会出错，客户端不会再“少收几个字节”。
 
 用法：
-    .venv\\Scripts\\python.exe client\\echo_client.py
-    .venv\\Scripts\\python.exe client\\echo_client.py 127.0.0.1 9000
-    .venv\\Scripts\\python.exe client\\echo_client.py 10.140.71.127 9000
+    .venv\\Scripts\\python.exe -m client.echo_client
+    .venv\\Scripts\\python.exe -m client.echo_client 127.0.0.1 9000
+    .venv\\Scripts\\python.exe -m client.echo_client 10.140.71.127 9000
 """
 
 import socket
 import sys
 import time
+
+from protocol.framing import ProtocolError, recv_frame, send_frame
 
 HOST = "127.0.0.1"
 PORT = 9000
@@ -32,15 +39,21 @@ def main() -> None:
 
             payload = line.encode("utf-8")  # 网络上只能传字节，不能传 str
             t0 = time.perf_counter()
-            sock.sendall(payload)  # 不保证一次发完，sendall 负责发完
-            echoed = sock.recv(1024)  # ⚠️ 只调用一次：不保证把 payload 收全
+            try:
+                send_frame(sock, payload)
+                echoed = recv_frame(sock)  # 阻塞，直到读到一个完整帧
+            except (ProtocolError, OSError) as exc:
+                print(f"[client] error: {exc}")
+                break
             rtt_ms = (time.perf_counter() - t0) * 1000
+
+            if echoed is None:
+                print("[client] server closed the connection")
+                break
 
             text = echoed.decode("utf-8", errors="replace")
             shown = text if len(text) <= 60 else text[:60] + "…"
             print(f"[client] echo {len(echoed)} B: {shown!r}  RTT {rtt_ms:.3f} ms")
-            if len(echoed) != len(payload):
-                print(f"[client] ⚠️ 只收到 {len(echoed)}/{len(payload)} B —— recv 不保证一次收全")
 
 
 if __name__ == "__main__":
