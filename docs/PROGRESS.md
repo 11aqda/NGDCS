@@ -3,8 +3,8 @@
 > **新会话请先读这份文件**，再读 `DECISIONS.md`，即可接上全部上下文。
 > 维护约定：每次会话结束前更新本文件。
 
-最后更新：2026-10-10
-当前阶段：**设计阶段已定稿（游戏形态改为竖版飞机大战）→ 下一步：前置准备，再开始写代码**
+最后更新：2026-10-19
+当前阶段：**阶段 1：第 3 步「帧边界单元测试」完成 → 下一步：第 4 步接入真正的 12 字节帧头与消息类型**
 
 ---
 
@@ -52,7 +52,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install <包名> -i https://pyp
 | 数据库 | 库 `myproject` + 用户 `django_user` | 已建（utf8mb4 / utf8mb4_unicode_ci） |
 | 缓存 | Redis 服务端 | 5.0.14.1，已解压到 `D:\Tools\Redis`（**未启动**） |
 | 接口调试 | Apifox | 2.8.50，已装于 `D:\Apps\Apifox` |
-| 仓库 | Git | `master` 分支，已提交 7 次 |
+| 仓库 | Git | `master` 分支，已提交 13 次 |
 
 **venv 已装 16 个包：**
 ```
@@ -69,7 +69,7 @@ PyMySQL 1.2.3 · redis 8.1.0 · requests 2.34.2 · sqlparse 0.6.0 · tzdata 2026
 | `matplotlib` | 论文出 16 张图 | 🔴 必须 | pip |
 | `psutil` | 实验采集 CPU / 内存 | 🔴 必须 | pip |
 | `djangorestframework` | HTTP 接口层（D-005） | 🔴 必须 | pip |
-| `pytest` | 单元测试（粘包拆包必测） | 🟡 建议 | pip（也可用标准库 `unittest` 免装） |
+| `pytest` | 单元测试 | 🟡 可选 | **暂不装**：已用标准库 `unittest`（`tests\test_framing.py`） |
 | `numpy` | 实体数多时提性能 | ⚪ 按需 | pip（**当前玩法实体少，暂不需要**） |
 
 **一键安装命令：**
@@ -137,7 +137,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install matplotlib psutil djang
 - 位置：`E:\PythonProject\.git`
 - 分支：`master`
 - 首次提交：`31f881d chore: 初始化仓库，加入 pygame 飞机游戏源码与素材`
-- 已跟踪 13 个文件（7 个 `.py` + 5 个素材 + `.gitignore`）
+- 已跟踪 22 个文件（代码 + 文档 + 素材）
 - 远端：无（纯本地）
 - `.gitignore` 内容：`.venv/`、`__pycache__/`、`.idea/`、`*.pyc`
 
@@ -159,6 +159,94 @@ http_test.py    与游戏无关的 requests 测试
 
 `E:\PythonProject\docs\` —— `PROGRESS.md`（本文件）、`DECISIONS.md`
 
+### 2.6 阶段 1 · 第 1 步：回声服务器（2026-10-19）
+
+| 文件 | 说明 |
+|---|---|
+| `server\echo_server.py` | 阻塞式单客户端回声服务器，监听 `0.0.0.0:9000` |
+| `client\echo_client.py` | 命令行回声客户端，打印回显、字节数与 RTT |
+
+**验证记录**：
+
+- `127.0.0.1` 与 `10.140.71.127` 均可连通，中英文（UTF-8）回显正确
+- 发送 1100 B 时，客户端一次 `recv(1024)` 只拿到 1024 B → **证明 TCP 是字节流，没有消息边界**
+- 客户端强制断开时，服务端捕获 `ConnectionResetError`，进程继续服务下一个连接
+- 回环 RTT 约 **0.03~0.14 ms**
+
+### 2.7 阶段 1 · 第 2 步：长度前缀（2026-10-19）
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `protocol\framing.py` | 🆕 新增 | 4 字节大端长度 + 载荷；`pack_frame` / `send_frame` / `recv_exact` / `recv_frame` |
+| `protocol\__init__.py` | 🆕 新增 | 协议包 |
+| `server\__init__.py` | 🆕 新增 | 服务端包（配合 `python -m`） |
+| `client\__init__.py` | 🆕 新增 | 客户端包（配合 `python -m`） |
+| `server\echo_server.py` | ✏️ 修改 | 改用帧收发；协议错误时断开该连接 |
+| `client\echo_client.py` | ✏️ 修改 | 收发都按帧；1100 B 消息不再截断 |
+
+**帧格式（本步）**：
+
+```
++--------+---------------------------+
+| length |          payload          |
+| uint32 |       length bytes        |
++--------+---------------------------+
+  length 只算载荷，不含自己这 4 字节；MAX_PAYLOAD = 64 KiB
+```
+
+**验证记录**：
+
+- **粘包**：两条帧一次 `sendall` → 服务端正确拆成 `b'one'` / `b'two'`
+- **半包**：先发帧头，隔 0.3 s 再发载荷 → 正确还原 `b'hello-half'`
+- **空载荷**：`length=0` → 正常回显 `b''`
+- **超大包**：声明 1,000,000 B > 64 KiB → 服务端抛 `ProtocolError` 并断开，客户端收到 EOF
+- **大消息**：1100 B 完整回显（第 1 步只收到 1024 B）
+- **中文**：UTF-8 载荷 12 B 原样往返
+
+**运行方式（改为模块方式）**：
+
+```powershell
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.echo_server 9000
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m client.echo_client 127.0.0.1 9000
+```
+
+> `-X utf8` 只影响当前 Python 进程的编码，不是环境变量；不写也能跑，但中文日志在管道/后台输出时可能乱码。
+
+### 2.8 阶段 1 · 第 3 步：帧边界单元测试（2026-10-19）
+
+| 文件 | 说明 |
+|---|---|
+| `tests\test_framing.py` | 15 个用例，覆盖半包 / 粘包 / 边界 / 超大包 / 空载荷 / 截断 / EOF |
+| `tests\__init__.py` | 测试包 |
+
+**测试方法**：
+
+- `FakeSocket` 精确控制每次 `recv(n)` 返回多少字节，不依赖真实网络的到达方式
+- 另有一个 `socket.socketpair()` 用例，验证 `send_frame` 与 `recv_frame` 在**真实 socket** 上能对接
+
+**覆盖矩阵**：
+
+| 场景 | 对应用例 |
+|---|---|
+| 半包（帧头 / 载荷被拆） | `test_split_at_every_byte`（每个字节位置切）、`test_one_byte_at_a_time` |
+| 粘包（一次收到 N 条） | `test_sticky_two_frames`、`test_five_frames_in_one_chunk` |
+| 边界（长度恰好） | `test_max_payload_accepted` |
+| 超大包 | `test_oversized_length_rejected_before_payload`、`test_pack_too_large_rejected` |
+| 空载荷 | `test_empty_payload` |
+| 截断 / EOF | `test_truncated_header_raises`、`test_truncated_payload_raises`、`test_clean_eof_returns_none` |
+| 二进制安全 | `test_round_trip_binary_safe`（载荷含 `\n` / `\x00`） |
+| 真实 socket | `test_send_frame_over_real_socketpair` |
+
+**运行**：
+
+```powershell
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -t . -v
+```
+
+**结果**：`Ran 15 tests in 0.002s — OK`。
+
+> `越界坐标` 属于编解码层，等第 4 步 `codec.py` 实现后再测。
+
 ---
 
 ## 3. 已踩过的坑（重要，别再踩）
@@ -171,6 +259,8 @@ http_test.py    与游戏无关的 requests 测试
 | 4 | PyMySQL 连 MySQL 8 可能报 cryptography 缺失 | MySQL 8 默认 `caching_sha2_password` 认证 | 在 venv 装 `cryptography` |
 | 5 | GitHub 无法访问 | 网络层封锁，`github.com:443` 超时 | 开加速器后用 `curl --ssl-no-revoke`（schannel 吊销检查不可达） |
 | 6 | `mysql` 命令找不到 | MySQL `bin` 目录不在 PATH（按要求未改环境变量） | 用全路径调用 |
+| 7 | 连**本机局域网 IP**，RTT 仍 < 1 ms、传输速度 1000+ MB/s | Windows 把发往本机地址的流量**短路到回环**，不经过网卡 | 用网卡计数器验证：传 16 MB 后 WLAN 收发增量≈0；真实网络实验需虚拟机/第二台设备（见 D-016） |
+| 8 | `python server\echo_server.py` 报 `ModuleNotFoundError: No module named 'protocol'` | 直接跑脚本时 `sys.path[0]` 是脚本目录（`server\`），不是项目根 | 从项目根用 `python -m server.echo_server` 运行 |
 
 ---
 
@@ -234,7 +324,11 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 
 - [x] ~~排行榜 / 关卡进度缺少数据来源~~ → **已解决**：飞机大战自带分数与关卡（D-009）
 - [x] ~~成绩伪造~~ → **已解决**：取消客户端上报，**服务端直接写分**（D-009 / `04 §3.1`）
-- [ ] **网络实验数据来源** —— 不装虚拟机、只用本机多进程，**必须在阶段 1 实测**「连本机局域网 IP」能否拿到真实 RTT 与抖动（见 `01-系统架构.md §11.2`、`03-实验清单.md §2.2`）
+- [x] **网络实验数据来源** —— **已实测（2026-10-19）：本机自连局域网 IP 拿不到真实网络指标**
+  - `ping 127.0.0.1` 与 `ping 10.140.71.127` 均 < 1 ms；回声 RTT **0.03~0.14 ms**
+  - 向 `10.140.71.127` 传 16 MB：**1145.8 MB/s**，WLAN 网卡收发增量仅 **0.001 / 0.012 MB** → 流量没走网卡
+  - **结论**：协议 / 并发 / 逻辑验证可继续用本机多进程；**RTT / 抖动 / 丢包 / 网络损伤实验必须用虚拟机（桥接）或第二台设备**（触发 `01 §11.2` 的兜底，见 D-016）
+- [ ] **落实网络实验环境**（虚拟机桥接 / 第二台设备）—— 第 13 周性能测试前必须就绪
 - [ ] **窗口尺寸是否放得下** —— 720×960 需屏幕高度 ≥ 1000 px，开工时实测；放不下降到 600×800
 - [ ] 待装依赖与文件**见 §1.2 权威清单**（不要再在本节重复维护）
 
@@ -258,6 +352,10 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 
 > **注意步骤 6 与 11 的分离**：先用**占位方块**跑通通信（步骤 6），
 > 游戏内容（步骤 11）排在最后。详见 `01-系统架构.md §3.4` 与 D-010。
+>
+> **进度**：第 1 步 ✅ 2026-10-19（回声服务器）；第 2 步 ✅ 2026-10-19（长度前缀，
+> `protocol\framing.py`）；第 3 步 ✅ 2026-10-19（15 个帧边界用例，`tests\test_framing.py`）；
+> 第 4 步「12 字节帧头 + 消息类型」为下一步。
 
 #### 教学原则（重要）
 
@@ -265,6 +363,33 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 - 每完成一块，解释三件事：**为什么这么设计 / 有什么替代方案 / 为什么没选**
 - **这些解释就是答辩答案** —— 要同步记进 `DECISIONS.md`
 - 学员 Python 有基础，但**没用过 `socket` / `asyncio` / `struct`**，需要边做边讲
+
+#### ⭐ 人话笔记制度（2026-10-19 新增，**必须执行**）
+
+**每完成一步代码，必须同时产出 `docs/notes/NN-<步骤>-人话版.md`，否则不许进下一步。**
+
+每份笔记必须包含：
+
+| 内容 | 要求 |
+|---|---|
+| 这步解决什么问题 | 用生活化比喻，不用术语开头 |
+| 核心逻辑 | 逐行讲，标明「必须懂」的最小集合 |
+| 防御性代码 | 单独列出来，说明「防的是什么」 |
+| **可以跳过的语法** | 明确列出，让学员放心跳过 |
+| 自测题 | 5 道左右，附答案；能用自己的话说出来才算过 |
+| 答辩话术 | 一段可直接背的模板 |
+
+**放行标准**：**用户确认看懂了**，才进入下一步。
+
+> **起因**：2026-10-19，学员在第 3 步（`protocol/framing.py` + 测试）出现明显看不懂，
+> 明确说出「我好像有点看不懂代码了」。
+>
+> 这是毕设最常见的死法 —— 硬撑到第 15 周才崩就救不回来了。
+> **第 3 步发现、还有 17 周可修，是最好的时机。**
+
+**已有笔记**：`docs/notes/01-framing-人话版.md`（第 2~3 步，已验证 15 个测试全过）
+
+**为什么这条规矩能救命**：答辩前要复习，看的是这些笔记，不是 3000 行代码。
 
 #### 优先级梯队（进度紧张时按此砍）
 
