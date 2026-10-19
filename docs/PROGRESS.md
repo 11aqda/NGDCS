@@ -4,7 +4,7 @@
 > 维护约定：每次会话结束前更新本文件。
 
 最后更新：2026-10-19
-当前阶段：**阶段 1：第 3 步「帧边界单元测试」完成 → 下一步：第 4 步接入真正的 12 字节帧头与消息类型**
+当前阶段：**阶段 1：第 4 步「12 字节帧头」完成 → 等你确认人话笔记后进入第 5 步（20 Hz tick + 广播）**
 
 ---
 
@@ -53,7 +53,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install <包名> -i https://pyp
 | 缓存 | Redis 服务端 | 5.0.14.1，已解压到 `D:\Tools\Redis`（**未启动**） |
 | 接口调试 | Apifox | 2.8.50，已装于 `D:\Apps\Apifox` |
 | 虚拟化 | VMware Workstation + Ubuntu Desktop | 已装；**仅用 VMnet1 仅主机模式**，桥接 WiFi 已实测不可用（D-016） |
-| 仓库 | Git | `master` 分支，已提交 15 次 |
+| 仓库 | Git | `master` 分支，已提交 17 次 |
 
 **venv 已装 16 个包：**
 ```
@@ -138,7 +138,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install matplotlib psutil djang
 - 位置：`E:\PythonProject\.git`
 - 分支：`master`
 - 首次提交：`31f881d chore: 初始化仓库，加入 pygame 飞机游戏源码与素材`
-- 已跟踪 29 个文件（代码 + 文档 + 素材）
+- 已跟踪 31 个文件（代码 + 文档 + 素材）
 - 远端：无（纯本地）
 - `.gitignore` 内容：`.venv/`、`__pycache__/`、`.idea/`、`*.pyc`
 
@@ -247,6 +247,34 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests 
 **结果**：`Ran 15 tests in 0.002s — OK`。
 
 > `越界坐标` 属于编解码层，等第 4 步 `codec.py` 实现后再测。
+
+### 2.9 阶段 1 · 第 4 步：12 字节帧头（2026-10-19）
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `protocol\framing.py` | ✏️ 修改 | 4 B 长度 → 12 B 帧头；`recv_frame()` 返回 `Frame` |
+| `protocol\messages.py` | 🆕 新增 | 阶段 1 临时回声类型 `ECHO = 0x7F` |
+| `server\echo_server.py` | ✏️ 修改 | 打印 type/seq；回声固定 `type=ECHO`、`seq` 原样返回 |
+| `client\echo_client.py` | ✏️ 修改 | 每条消息 `seq + 1`；校验响应的 type/seq |
+| `tests\test_framing.py` | ✏️ 修改 | 按 12 B 帧头重写，**19 个用例** |
+| `docs\notes\02-12byte-header-人话版.md` | 🆕 新增 | 人话笔记（按 2026-10-19 制度） |
+
+**帧头（所有多字节字段为大端）**：
+
+| 偏移 | 长度 | 字段 | 类型 | 值 / 说明 |
+|---|---|---|---|---|
+| 0 | 2 | `magic` | uint16 | `0x4A59` |
+| 2 | 1 | `version` | uint8 | `1` |
+| 3 | 1 | `type` | uint8 | 消息类型；阶段 1 用 `ECHO=0x7F` |
+| 4 | 4 | `seq` | uint32 | 发送方递增序号 |
+| 8 | 4 | `length` | uint32 | 载荷字节数（不含帧头） |
+| 12 | N | `payload` | bytes | 载荷 |
+
+**验证记录**：
+
+- 19 个单元测试全部通过（`0.002 s`）
+- 端到端：`seq=1/2` 正确回显，`type=0x7F`；1100 B 完整；中文 UTF-8 正确
+- 覆盖 magic / version 错误、type/seq 越界、超大包、截断、空载荷、粘包、半包
 
 ---
 
@@ -360,9 +388,9 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 > **注意步骤 6 与 11 的分离**：先用**占位方块**跑通通信（步骤 6），
 > 游戏内容（步骤 11）排在最后。详见 `01-系统架构.md §3.4` 与 D-010。
 >
-> **进度**：第 1 步 ✅ 2026-10-19（回声服务器）；第 2 步 ✅ 2026-10-19（长度前缀，
-> `protocol\framing.py`）；第 3 步 ✅ 2026-10-19（15 个帧边界用例，`tests\test_framing.py`）；
-> 第 4 步「12 字节帧头 + 消息类型」为下一步。
+> **进度**：第 1 步 ✅（回声服务器）；第 2 步 ✅（长度前缀）；第 3 步 ✅（15 个帧边界用例）；
+> 第 4 步 ✅ 2026-10-19（12 字节帧头 + `protocol/messages.py`，19 个用例）；
+> **第 5 步「20 Hz tick + 广播」等你确认人话笔记后再开始。**
 
 #### 教学原则（重要）
 

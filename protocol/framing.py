@@ -1,18 +1,27 @@
-"""长度前缀帧：4 字节大端长度 + 载荷。
+"""12 字节帧头 + 载荷。
 
-为什么用长度前缀，而不是分隔符？
-    TCP 是字节流。要把“一条消息”从流里切出来，最可靠的办法是先知道它有多长。
-    分隔符（比如 \\n）遇到二进制载荷必须转义，既增加体积又容易出错；
-    长度前缀对任意字节都安全。详见 docs/02-协议设计.md §3。
+帧格式（所有多字节字段为大端 / 网络字节序）：
 
-本步只做 4 字节长度；第 4 步会扩展成 12 字节帧头
-（magic + version + type + seq + length），但“先读长度、再读载荷”的核心不变。
+    偏移  长度  字段      类型      说明
+    0     2     magic     uint16    固定 0x4A59
+    2     1     version   uint8     当前 1
+    3     1     type      uint8     消息类型（见 protocol/messages.py）
+    4     4     seq       uint32    发送方递增序列号
+    8     4     length    uint32    载荷字节数（不含帧头）
+    12    N     payload   bytes     载荷
 
-    +--------+---------------------------+
-    | length |          payload          |
-    | uint32 |       length bytes        |
-    +--------+---------------------------+
-      length 只算载荷，不含自己这 4 字节
+    +--------+---------+------+--------+--------+------------------+
+    | magic  | version | type | seq    | length | payload          |
+    | uint16 | uint8   | uint8| uint32 | uint32 | length bytes     |
+    +--------+---------+------+--------+--------+------------------+
+    帧头固定 12 B
+
+为什么有 magic / version / type / seq？
+    magic   —— 快速判断“这是不是我们的协议”，也能发现字节流错位
+    version —— 协议升级时拒绝不兼容的对端，而不是解析出乱码
+    type    —— 同一条 TCP 连接上跑多种消息，接收方要知道交给谁处理
+    seq     —— 请求-响应关联（算 RTT）、丢包检测、防重放
+    length  —— 划出消息边界（第 2 步的核心，位置从 0 变成 8）
 
 注意：
     recv_exact() 假设 socket 是**阻塞**的。第 6 步客户端改成非阻塞后，
@@ -23,9 +32,13 @@ from __future__ import annotations
 
 import socket
 import struct
+from dataclasses import dataclass
 
-# ! = 网络字节序（大端）；I = 4 字节无符号整数
-HEADER = struct.Struct("!I")
+MAGIC = 0x4A59
+VERSION = 1
+
+# ! = 网络字节序（大端）；HBBII = 2 + 1 + 1 + 4 + 4 = 12 字节
+HEADER = struct.Struct("!HBBII")
 
 # 单个载荷上限：防止对端报一个 4 GB 的长度，把内存吃光
 MAX_PAYLOAD = 64 * 1024
@@ -35,16 +48,29 @@ class ProtocolError(Exception):
     """帧格式错误、连接提前关闭、载荷超限。"""
 
 
-def pack_frame(payload: bytes) -> bytes:
-    """把一段载荷封装成“4 字节长度 + 载荷”。"""
+@dataclass(frozen=True, slots=True)
+class Frame:
+    """一帧的语义字段（magic / version 已校验，不再返回）。"""
+
+    msg_type: int
+    seq: int
+    payload: bytes
+
+
+def pack_frame(msg_type: int, seq: int, payload: bytes) -> bytes:
+    """把 type / seq / payload 封装成“12 B 帧头 + 载荷”。"""
+    if not 0 <= msg_type <= 0xFF:
+        raise ProtocolError(f"type 超出 uint8：{msg_type}")
+    if not 0 <= seq <= 0xFFFFFFFF:
+        raise ProtocolError(f"seq 超出 uint32：{seq}")
     if len(payload) > MAX_PAYLOAD:
         raise ProtocolError(f"载荷超限：{len(payload)} B > {MAX_PAYLOAD} B")
-    return HEADER.pack(len(payload)) + payload
+    return HEADER.pack(MAGIC, VERSION, msg_type, seq, len(payload)) + payload
 
 
-def send_frame(sock: socket.socket, payload: bytes) -> None:
+def send_frame(sock: socket.socket, msg_type: int, seq: int, payload: bytes) -> None:
     """封装并发送一帧。sendall 负责把数据全部写进内核缓冲区。"""
-    sock.sendall(pack_frame(payload))
+    sock.sendall(pack_frame(msg_type, seq, payload))
 
 
 def recv_exact(sock: socket.socket, n: int) -> bytes | None:
@@ -73,17 +99,21 @@ def recv_exact(sock: socket.socket, n: int) -> bytes | None:
     return b"".join(chunks)
 
 
-def recv_frame(sock: socket.socket) -> bytes | None:
-    """读一个完整帧，返回载荷；对端在帧边界关闭时返回 None。"""
+def recv_frame(sock: socket.socket) -> Frame | None:
+    """读一个完整帧；对端在帧边界关闭时返回 None。"""
     header = recv_exact(sock, HEADER.size)
     if header is None:
         return None
 
-    (length,) = HEADER.unpack(header)
+    magic, version, msg_type, seq, length = HEADER.unpack(header)
+    if magic != MAGIC:
+        raise ProtocolError(f"magic 不匹配：0x{magic:04X} != 0x{MAGIC:04X}")
+    if version != VERSION:
+        raise ProtocolError(f"version 不支持：{version} != {VERSION}")
     if length > MAX_PAYLOAD:
         raise ProtocolError(f"载荷超限：{length} B > {MAX_PAYLOAD} B")
 
     payload = recv_exact(sock, length)
     if payload is None:
         raise ProtocolError("帧头之后连接关闭，帧不完整")
-    return payload
+    return Frame(msg_type=msg_type, seq=seq, payload=payload)
