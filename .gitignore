@@ -7,3 +7,6 @@ __pycache__/
 
 # ---- IDE ----
 .idea/
+
+# ---- 本地日志 / 临时文件 ----
+debug.log

@@ -3,8 +3,8 @@
 > **新会话请先读这份文件**，再读 `DECISIONS.md`，即可接上全部上下文。
 > 维护约定：每次会话结束前更新本文件。
 
-最后更新：2026-10-19
-当前阶段：**阶段 1：第 4 步「12 字节帧头」完成 → 等你确认人话笔记后进入第 5 步（20 Hz tick + 广播）**
+最后更新：2026-10-21
+当前阶段：**阶段 1：第 6 步「pygame 渲染 + 插值」已实现 → 等你确认人话笔记后进入第 7 步（机器人客户端）**
 
 ---
 
@@ -53,7 +53,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install <包名> -i https://pyp
 | 缓存 | Redis 服务端 | 5.0.14.1，已解压到 `D:\Tools\Redis`（**未启动**） |
 | 接口调试 | Apifox | 2.8.50，已装于 `D:\Apps\Apifox` |
 | 虚拟化 | VMware Workstation + Ubuntu Desktop | 已装；**仅用 VMnet1 仅主机模式**，桥接 WiFi 已实测不可用（D-016） |
-| 仓库 | Git | `master` 分支，已提交 17 次 |
+| 仓库 | Git | `master` 分支，已提交 18 次 |
 
 **venv 已装 16 个包：**
 ```
@@ -138,7 +138,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install matplotlib psutil djang
 - 位置：`E:\PythonProject\.git`
 - 分支：`master`
 - 首次提交：`31f881d chore: 初始化仓库，加入 pygame 飞机游戏源码与素材`
-- 已跟踪 31 个文件（代码 + 文档 + 素材）
+- 已跟踪 45 个文件（代码 + 文档 + 素材）
 - 远端：无（纯本地）
 - `.gitignore` 内容：`.venv/`、`__pycache__/`、`.idea/`、`*.pyc`
 
@@ -276,6 +276,76 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests 
 - 端到端：`seq=1/2` 正确回显，`type=0x7F`；1100 B 完整；中文 UTF-8 正确
 - 覆盖 magic / version 错误、type/seq 越界、超大包、截断、空载荷、粘包、半包
 
+### 2.10 阶段 1 · 第 5 步：asyncio + 20 Hz tick + 广播（2026-10-21）
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `server\main.py` | 🆕 新增 | asyncio 服务端；多客户端；20 Hz tick；广播 `S_SNAPSHOT` |
+| `client\console.py` | 🆕 新增 | 控制台占位客户端（第 6 步从 `client/main.py` 移出） |
+| `protocol\snapshot.py` | 🆕 新增 | 快照头（13 B）+ 玩家条目（11 B）编解码 |
+| `protocol\framing.py` | ✏️ 修改 | 新增 `parse_header`、`recv_frame_async`、`send_frame_async` |
+| `protocol\messages.py` | ✏️ 修改 | 新增 `S_WELCOME=0x7C`、`S_SNAPSHOT=0x84`、`WELCOME` |
+| `tests\test_framing_async.py` | 🆕 新增 | asyncio 接收的 5 个用例 |
+| `tests\test_snapshot.py` | 🆕 新增 | 快照编解码的 7 个用例 |
+| `docs\notes\03-tick-broadcast-人话版.md` | 🆕 新增 | 人话笔记 |
+
+**本步范围**：
+
+- 客户端连上 → 服务端分配 `player_id` / `color`（`S_WELCOME` 临时消息）
+- 每 50 ms tick：占位玩家左右摆动 → 向所有客户端广播 `S_SNAPSHOT`
+- 快照只带玩家；敌机 / 子弹 / 道具计数为 0
+- **不做**房间、客户端输入、渲染 / 插值
+
+**验证记录**：
+
+- 31 个单元测试全部通过（`0.156 s`）
+- 两个客户端同时连接：`player 1/2` 都收到同一份快照，能看到彼此坐标在变
+- 客户端断开后服务端清理，不残留玩家
+
+**运行**：
+
+```powershell
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m client.console Alice
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m client.console Bob
+```
+
+### 2.11 阶段 1 · 第 6 步：pygame 渲染 + 插值（2026-10-21）
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `client\main.py` | ✏️ 重写 | pygame 720×960 占位客户端；非阻塞轮询 + 一帧线性插值 + HUD |
+| `client\net.py` | 🆕 新增 | 非阻塞 TCP 客户端；每帧 `poll()` 一次 |
+| `client\console.py` | 🆕 新增 | 原控制台客户端，保留用于调试 |
+| `protocol\framing.py` | ✏️ 修改 | 新增 `FrameParser`（非阻塞拼帧） |
+| `tests\test_frame_parser.py` | 🆕 新增 | 8 个非阻塞拼帧用例 |
+| `docs\notes\04-render-interpolation-人话版.md` | 🆕 新增 | 人话笔记 |
+
+**本步范围**：
+
+- 非阻塞 socket + 每帧轮询（D-007），主循环不会卡在 `recv`
+- 20 Hz 快照 → 前后两帧线性插值 → 60 fps 渲染
+- 720×960 竖版窗口；桌面高度 < 1000 px 时自动降为 600×800
+- 占位方块 + 网格 + HUD（tick / 人数 / FPS / 连接状态）
+- **不做**键盘输入、房间、游戏内容
+
+**验证记录**：
+
+- 39 个单元测试全部通过（`0.100 s`）
+- pygame 客户端启动，窗口 `720×960`，能连上服务端并保持渲染
+- 控制台客户端同时连入：`P1/P2` 在同一 tick 的坐标一致
+- 屏幕尺寸降级、断线提示代码已写；未专门在小于 1000 px 的屏幕上验证
+
+**运行**：
+
+```powershell
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m client.main
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m client.console Bob 10
+```
+
+> 想看两个方块：开两个 `client.main` 窗口，或一个 `client.main` + 一个 `client.console`。
+
 ---
 
 ## 3. 已踩过的坑（重要，别再踩）
@@ -340,12 +410,12 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 
 ### 4.3 TCP 通信系统（毕设核心）
 
-- [ ] 协议编解码 + 粘包拆包（含单元测试）
-- [ ] asyncio TCP 服务端骨架
+- [x] 协议编解码 + 粘包拆包（含单元测试）—— 帧 + 玩家快照已实现
+- [x] asyncio TCP 服务端骨架 —— `server/main.py`
 - [ ] 房间系统
 - [ ] 机器人客户端
-- [ ] **占位对象同步**（几个方块，先跑通通信）
-- [ ] 状态同步 + 客户端插值
+- [x] **占位对象同步**（几个方块，先跑通通信）—— 服务端广播 + 客户端渲染均已完成
+- [x] 状态同步 + 客户端插值 —— 基础版：前后两帧线性插值（一帧滞后）；完整快照缓冲后续
 - [ ] 压测 + 对比实验（编码 / IO 模型 / 网络损伤 / **实体数影响 E9**）
 - [ ] Wireshark 抓包验证
 
@@ -388,9 +458,10 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 > **注意步骤 6 与 11 的分离**：先用**占位方块**跑通通信（步骤 6），
 > 游戏内容（步骤 11）排在最后。详见 `01-系统架构.md §3.4` 与 D-010。
 >
-> **进度**：第 1 步 ✅（回声服务器）；第 2 步 ✅（长度前缀）；第 3 步 ✅（15 个帧边界用例）；
-> 第 4 步 ✅ 2026-10-19（12 字节帧头 + `protocol/messages.py`，19 个用例）；
-> **第 5 步「20 Hz tick + 广播」等你确认人话笔记后再开始。**
+> **进度**：第 1 步 ✅（回声服务器）；第 2 步 ✅（长度前缀）；第 3 步 ✅（帧边界测试）；
+> 第 4 步 ✅（12 字节帧头）；第 5 步 ✅（asyncio + 20 Hz tick + 广播）；
+> 第 6 步 ✅ 2026-10-21（pygame 渲染 + 一帧线性插值，39 个测试）；
+> **第 7 步「机器人客户端」等你确认人话笔记后再开始。**
 
 #### 教学原则（重要）
 

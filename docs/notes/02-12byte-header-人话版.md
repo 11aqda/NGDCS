@@ -318,6 +318,9 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.echo_server 9000
 E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m client.echo_client 127.0.0.1 9000
 ```
 
+> 想按字节看一条消息：运行 `python -X utf8 -m tools.trace_one_message`（纯学习脚本，不改 server/client）。
+> 它会打印 `"hi"` 的 14 个字节、半包时的每次 recv、以及两条帧粘在一起时如何分开。
+
 ---
 
 ## 9. 现在的限制 / 下一步

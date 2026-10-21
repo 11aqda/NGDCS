@@ -23,13 +23,16 @@
     seq     —— 请求-响应关联（算 RTT）、丢包检测、防重放
     length  —— 划出消息边界（第 2 步的核心，位置从 0 变成 8）
 
-注意：
-    recv_exact() 假设 socket 是**阻塞**的。第 6 步客户端改成非阻塞后，
-    会换成“缓冲区 + 状态机”的 FrameParser；帧格式本身不变。
+同步 / 异步 / 非阻塞三套 API：
+    - recv_frame(sock) / send_frame(sock, ...)       阻塞 socket 用
+    - recv_frame_async(reader) / send_frame_async(...)  asyncio 用
+    - FrameParser.feed() / next_frame()              非阻塞 socket（pygame 主循环）用
+    三者共用 parse_header()，所以校验规则只写一遍。
 """
 
 from __future__ import annotations
 
+import asyncio
 import socket
 import struct
 from dataclasses import dataclass
@@ -57,6 +60,24 @@ class Frame:
     payload: bytes
 
 
+def parse_header(header: bytes) -> tuple[int, int, int]:
+    """校验 12 B 帧头，返回 (msg_type, seq, length)。
+
+    同步和异步接收共用这一份校验逻辑。
+    """
+    if len(header) != HEADER.size:
+        raise ProtocolError(f"帧头长度错误：{len(header)} != {HEADER.size}")
+
+    magic, version, msg_type, seq, length = HEADER.unpack(header)
+    if magic != MAGIC:
+        raise ProtocolError(f"magic 不匹配：0x{magic:04X} != 0x{MAGIC:04X}")
+    if version != VERSION:
+        raise ProtocolError(f"version 不支持：{version} != {VERSION}")
+    if length > MAX_PAYLOAD:
+        raise ProtocolError(f"载荷超限：{length} B > {MAX_PAYLOAD} B")
+    return msg_type, seq, length
+
+
 def pack_frame(msg_type: int, seq: int, payload: bytes) -> bytes:
     """把 type / seq / payload 封装成“12 B 帧头 + 载荷”。"""
     if not 0 <= msg_type <= 0xFF:
@@ -71,6 +92,14 @@ def pack_frame(msg_type: int, seq: int, payload: bytes) -> bytes:
 def send_frame(sock: socket.socket, msg_type: int, seq: int, payload: bytes) -> None:
     """封装并发送一帧。sendall 负责把数据全部写进内核缓冲区。"""
     sock.sendall(pack_frame(msg_type, seq, payload))
+
+
+async def send_frame_async(
+    writer: asyncio.StreamWriter, msg_type: int, seq: int, payload: bytes
+) -> None:
+    """asyncio 版发送：write + drain，确保数据交给内核。"""
+    writer.write(pack_frame(msg_type, seq, payload))
+    await writer.drain()
 
 
 def recv_exact(sock: socket.socket, n: int) -> bytes | None:
@@ -105,15 +134,69 @@ def recv_frame(sock: socket.socket) -> Frame | None:
     if header is None:
         return None
 
-    magic, version, msg_type, seq, length = HEADER.unpack(header)
-    if magic != MAGIC:
-        raise ProtocolError(f"magic 不匹配：0x{magic:04X} != 0x{MAGIC:04X}")
-    if version != VERSION:
-        raise ProtocolError(f"version 不支持：{version} != {VERSION}")
-    if length > MAX_PAYLOAD:
-        raise ProtocolError(f"载荷超限：{length} B > {MAX_PAYLOAD} B")
-
+    msg_type, seq, length = parse_header(header)
     payload = recv_exact(sock, length)
     if payload is None:
         raise ProtocolError("帧头之后连接关闭，帧不完整")
     return Frame(msg_type=msg_type, seq=seq, payload=payload)
+
+
+async def recv_frame_async(reader: asyncio.StreamReader) -> Frame | None:
+    """asyncio 版接收：先读满 12 B 帧头，再按 length 读满载荷。"""
+    try:
+        header = await reader.readexactly(HEADER.size)
+    except asyncio.IncompleteReadError as exc:
+        if not exc.partial:
+            return None  # 帧边界上的正常关闭
+        raise ProtocolError(
+            f"连接提前关闭：帧头只收到 {len(exc.partial)} B"
+        ) from exc
+
+    msg_type, seq, length = parse_header(header)
+
+    try:
+        payload = await reader.readexactly(length)
+    except asyncio.IncompleteReadError as exc:
+        missing = exc.expected - len(exc.partial)
+        raise ProtocolError(f"连接提前关闭：载荷还差 {missing} B") from exc
+    return Frame(msg_type=msg_type, seq=seq, payload=payload)
+
+
+class FrameParser:
+    """非阻塞接收用的帧解析器：喂任意分片，吐出完整 Frame。
+
+    用法：
+        parser = FrameParser()
+        parser.feed(data)                 # 每次 recv 到多少就喂多少
+        while True:
+            frame = parser.next_frame()
+            if frame is None:             # 还没有完整帧
+                break
+            handle(frame)
+
+    注意：解析失败（magic / version / length 错）会抛 ProtocolError，
+    调用方应关闭连接，不要继续喂数据。
+    """
+
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+
+    def feed(self, data: bytes) -> None:
+        """把一次 recv 到的字节追加到缓冲区。"""
+        self.buffer.extend(data)
+
+    def next_frame(self) -> Frame | None:
+        """取出一个完整帧；数据不够时返回 None，不阻塞。"""
+        if len(self.buffer) < HEADER.size:
+            return None
+
+        header = bytes(self.buffer[: HEADER.size])
+        msg_type, seq, length = parse_header(header)
+
+        total = HEADER.size + length
+        if len(self.buffer) < total:
+            return None  # 半包：等下一次 feed
+
+        payload = bytes(self.buffer[HEADER.size : total])
+        del self.buffer[:total]
+        return Frame(msg_type=msg_type, seq=seq, payload=payload)
