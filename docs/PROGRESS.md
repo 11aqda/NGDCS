@@ -3,8 +3,8 @@
 > **新会话请先读这份文件**，再读 `DECISIONS.md`，即可接上全部上下文。
 > 维护约定：每次会话结束前更新本文件。
 
-最后更新：2026-10-23
-当前阶段：**阶段 1：第 7 步 7b「输入 + heartbeat」完成 → 下一步：第 8 步 数据采集 + 压测实验（E9 是核心）**
+最后更新：2026-10-24
+当前阶段：**阶段 1：第 8 步 8a「占位实体 + 指标落盘」完成 → 下一步：8b 跑 E9（⚠️ 开工前需先拍板一件事，见 §2.14 末尾）**
 
 ---
 
@@ -55,27 +55,44 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install <包名> -i https://pyp
 | 虚拟化 | VMware Workstation + Ubuntu Desktop | 已装；**仅用 VMnet1 仅主机模式**，桥接 WiFi 已实测不可用（D-016） |
 | 仓库 | Git | `master` 分支，已提交 19 次 |
 
-**venv 已装 16 个包：**
+**venv 已装 29 个包：**
 ```
-asgiref 3.12.1 · certifi · cffi 2.1.1 · charset-normalizer 3.5.1 · cryptography 50.0.2
-Django 5.2.18 · idna 3.20 · pip 26.2.1 · pycparser 3.11 · pygame 2.6.1
-PyMySQL 1.2.3 · redis 8.1.0 · requests 2.34.2 · sqlparse 0.6.0 · tzdata 2026.5 · urllib3 2.8.0
+asgiref 3.12.1 · certifi 2026.7.22 · cffi 2.1.1 · charset-normalizer 3.5.1 · contourpy 1.4.0
+cryptography 50.0.2 · cycler 0.12.1 · Django 5.2.18 · fonttools 4.67.0 · idna 3.20
+kiwisolver 1.5.1 · matplotlib 3.11.2 · numpy 2.5.4 · packaging 26.3 · pillow 13.0.0
+pip 26.2.1 · psutil 7.2.2 · pycparser 3.11 · pygame 2.6.1 · PyMySQL 1.2.3
+pyparsing 3.3.3 · python-dateutil 3.0.0 · redis 8.1.0 · requests 2.34.2 · six 1.17.0
+sqlparse 0.6.0 · tzdata 2026.5 · urllib3 2.8.0
 ```
+
+> **2026-10-24 新增**：`matplotlib 3.11.2` + `psutil 7.2.2`（8a 出图与采集 CPU/内存），
+> 连带装进 `numpy 2.5.4` / `pillow` / `fonttools` / `contourpy` / `kiwisolver` /
+> `cycler` / `packaging` / `pyparsing` / `python-dateutil` / `six`。
+> **`numpy` 是 matplotlib 的依赖，不是我们主动要用的** ——
+> §1.2 原本标的是「实体数多时提性能，⚪ 按需」，目前游戏逻辑仍然不用它。
 
 #### ❌ 待安装
 
 | 项 | 用途 | 优先级 | 装法 |
 |---|---|---|---|
 | **Wireshark** | 抓包验证（毕设必备） | 🔴 必须 | **图形界面，需手动安装** |
-| `matplotlib` | 论文出 16 张图 | 🔴 必须 | pip |
-| `psutil` | 实验采集 CPU / 内存 | 🔴 必须 | pip |
 | `djangorestframework` | HTTP 接口层（D-005） | 🔴 必须 | pip |
-| `pytest` | 单元测试 | 🟡 可选 | **暂不装**：已用标准库 `unittest`（`tests\test_framing.py`） |
-| `numpy` | 实体数多时提性能 | ⚪ 按需 | pip（**当前玩法实体少，暂不需要**） |
+| `pytest` | 单元测试 | 🟡 可选 | **暂不装**：已用标准库 `unittest`（现有 153 个用例） |
+| ~~`matplotlib`~~ | ~~论文出 19 张图~~ | ✅ **已装 2026-10-24** | 3.11.2 |
+| ~~`psutil`~~ | ~~实验采集 CPU / 内存~~ | ✅ **已装 2026-10-24** | 7.2.2 |
+| ~~`numpy`~~ | ~~实体数多时提性能~~ | ⚪ **已随 matplotlib 装入** | 2.5.4（**未主动使用**） |
 
-**一键安装命令：**
+> **E9 开始前仍需**：装 **Wireshark**（E7 抓包用，图形界面需手动装）。
+> `djangorestframework` 是第 10 步（HTTP 层）的事，不急。
+
+**一键安装命令（原样保留，现在只剩 djangorestframework 待装）：**
 ```
-E:\PythonProject\.venv\Scripts\python.exe -m pip install matplotlib psutil djangorestframework pytest -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir --progress-bar off
+E:\PythonProject\.venv\Scripts\python.exe -m pip install djangorestframework -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir --progress-bar off
+```
+
+**已验证可用的安装命令（2026-10-24 实际执行）**：
+```
+E:\PythonProject\.venv\Scripts\python.exe -m pip install matplotlib psutil -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir --progress-bar off
 ```
 
 #### ⚠️ 明确**不需要**的（避免以后误装）
@@ -438,6 +455,86 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main 9527 --timeout 
 > 想看两个方块都在动：开两个 `client.main` 窗口，各自按 ←/→。
 > 想复现 7a 的「纯广播基线」：服务端 `--timeout 0` + 机器人 `--input-hz 0 --heartbeat 0`。
 
+### 2.14 阶段 1 · 第 8 步 8a：占位实体 + 指标落盘（2026-10-24）
+
+> **为什么叫 8a**：第 8 步原计划是「数据采集 + 压测实验」，但开工前发现
+> **E9 的自变量根本不存在** —— 服务端只有玩家方块，敌机/子弹连数据结构都没有
+> （`unpack_snapshot()` 还会主动拒绝非 0 的敌机计数）。所以拆成
+> **8a（造实体 + 修通采集链路，本次）** 和 **8b（跑 E9 六档位出图，下次）**，
+> 和 7a/7b 一样先隔离变量。详见 D-024。
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `server\entities.py` | 🆕 新增 | 占位实体 World：8 方向整数表、移动 / 出屏剔除 / **补足到目标数量** |
+| `server\metrics.py` | 🆕 新增 | 指标落盘 CSV + `cpu_percent_from_deltas`（单核占用） |
+| `tools\plot.py` | 🆕 新增 | 出图 6-17 / 6-18 / 6-19 |
+| `protocol\snapshot.py` | ✏️ 修改 | 补齐敌机(9 B) / 子弹(8 B) / 道具(7 B) 条目；`boss_present` 改为**推导** |
+| `protocol\messages.py` | ✏️ 修改 | 实体类型常量 + 角度基准常量 |
+| `server\stats.py` | ✏️ 修改 | 新增收发流量、快照体积统计 |
+| `server\main.py` | ✏️ 修改 | `--enemies` / `--bullets` / `--seed` / `--scenario` / `--metrics`；接入 World 与采集 |
+| `client\main.py` | ✏️ 修改 | 渲染敌机与子弹；HUD 显示 `e/b` |
+| `tests\test_snapshot.py` | ✏️ 重写 | 20 个用例：四类条目字节数、计数上限、BOSS 推导、尾部垃圾 |
+| `tests\test_entities.py` | 🆕 新增 | 25 个用例：角度换算、剔除、**数量恒定**、ID 回绕、可复现 |
+| `tests\test_metrics.py` | 🆕 新增 | 19 个用例：CSV 追加写、表头唯一、CPU 量纲、psutil 缺失降级 |
+| `tests\test_plot.py` | 🆕 新增 | 13 个用例：解析、按场景切分、丢热身窗口、三图冒烟 |
+| `tests\test_tick_stats.py` | ✏️ 修改 | 覆盖新增的流量 / 快照体积字段 |
+| `docs\02-协议设计.md` | ✏️ 修改 | 补 **0° = 正上、顺时针** 的角度基准（此前**未定义**）；四类条目与快照体积补实测 |
+| `docs\notes\07-placeholder-entities-人话版.md` | 🆕 新增 | 人话笔记 |
+| `.gitignore` | ✏️ 修改 | 忽略 `data/`（实验数据）与 `.cache/`（matplotlib 缓存） |
+
+**8a 范围**：
+
+- 四类快照条目**全部实现**，字节数与 `02 §6.2` 逐字节对齐
+- **占位实体**：无 AI、匀速直线（敌机 3 px/tick 向下；子弹 12 px/tick 按 angle 飞）
+- **出屏即剔除**（D-012 的落地，同时杜绝负坐标进 `uint16`）
+- **数量恒定**：出屏/被清除后立即补足 → E9 自变量稳定
+- **每秒一行** CSV：tick 耗时、快照体积、收发流量、CPU、内存
+- `tools/plot.py` 出图 6-17 / 6-18 / 6-19（含中文字体与 matplotlib 缓存目录处理）
+- **不做的**：敌机 AI / 碰撞 / 伤害 / 掉落 / 波次 / BOSS（第 11 步）
+
+**验证记录**：
+
+- **153 个单元测试全部通过**（0.63 s；7b 时是 88 个）
+- 冒烟跑（**不是 E9 正式数据**：每档只跑约 20 秒、只跑了两档）：
+
+  | 场景 | 实体 | tick_ms | 快照 | 下行/客户端 | CPU |
+  |---|---|---|---|---|---|
+  | 30 敌机 + 200 子弹 | 234 | 0.560 ms | **1926 B** | **38.7 KB/s** | 0.2 % |
+  | 100 敌机 + 800 子弹 | 904 | 1.396 ms | **7356 B** | **148.6 KB/s** | 1.7 % |
+
+- **逐字节核对通过**：`13 + 4×11 + 30×9 + 200×8 = 1927 B`（实测 1927）；
+  `13 + 4×11 + 100×9 + 800×8 = 7357 B`（实测 7357）✅
+- **带宽线性度**：实体数 3.86 倍 → 下行带宽 3.84 倍 ✅
+- **CPU 量纲已校验**：忙等 0.5 s/秒 → 读 **49.95%**；忙等 0.1 s/秒 → **9.37%**；空闲 → **0.0%**
+- 三张图已产出到 `docs\figures\`，中文标题正常（非方块）
+- ⚠️ 仍是本机 loopback，**不是最终网络实验数据**（D-016）
+
+**⚠️ 8b 开工前必须先拍板的一件事：E9 的 CPU 曲线要不要弯？**
+
+占位实体**没有碰撞检测**，而 `01 §7.1` 那份基准（100 敌机 + 800 子弹 = 4.37 ms/tick、87.3% 单核）
+**包含了「朴素 O(子弹×敌机) 碰撞检测」= 每 tick 8 万次判定**，那才是 CPU 大头。
+我们实测同规模只有 1.396 ms / 1.7%。
+
+| 方案 | 结果 | 代价 |
+|---|---|---|
+| **A. 只测通信层开销**（现状） | 图 6-18 很强；图 6-17/6-19 很平。论文结论：「通信层不是瓶颈，瓶颈在游戏逻辑」 | 无 |
+| **B. 加一个 O(子弹×敌机) 的占位碰撞判定** | 复现 §7.1 的算力剖面，三张图都能出拐点 | 写一段第 11 步会被替换掉的临时逻辑 |
+
+> 两个结论都成立、都能写进论文，但**图 6-19 的"50% 舒适线"只有 B 才碰得到**。
+> D-011 的「敌机 ≤ 30、子弹 ≤ 300」是**基于 B 那份基准**定的 ——
+> 如果走 A，那条约束在论文里的论证链会断一半。**建议 B**，但要你点头。
+
+**运行**：
+
+```powershell
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main --enemies 30 --bullets 200 --scenario E9-e30-b200-01
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m bot.main --clients 4 --duration 180
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m tools.plot --csv data/server_metrics.csv --out docs/figures
+```
+
+> 指标默认写到 `data\server_metrics.csv`（**默认开启**，怕忘了采数据）；
+> 随手试玩不想留数据就加 `--no-metrics`。场景信息另写 `data\server_scenario.csv`。
+
 ---
 
 ## 3. 已踩过的坑（重要，别再踩）
@@ -454,6 +551,9 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main 9527 --timeout 
 | 8 | `python server\echo_server.py` 报 `ModuleNotFoundError: No module named 'protocol'` | 直接跑脚本时 `sys.path[0]` 是脚本目录（`server\`），不是项目根 | 从项目根用 `python -m server.echo_server` 运行 |
 | 9 | 后台 / 管道运行服务端时，`print` 的日志迟迟看不到 | Python 的 stdout 在**非终端**下是块缓冲（攒满才刷）；日志量小就一直不刷 | 加 `-u`（`python -X utf8 -u -m server.main`）；这也是 §2.7 提过 `-X utf8` 要配合的场景 |
 | 10 | 写验证脚本时「等 0.1 s 没有数据就算读干净」**死循环** | 快照每 50 ms 一帧，**永远不会有 100 ms 静默** | 判断「流停了」不能用「静默超时」；改成固定时长（如读 0.7 s 再丢弃），或按 tick 号判断 |
+| 11 | 跑完测试，**仓库根目录冒出一个 `matplotlib-xxxx/`** | matplotlib 默认把字体缓存写到 `C:\Users\<用户>\AppData\Local\matplotlib`；那个目录不可写时，它**退而在当前工作目录建临时目录** | 在 `import matplotlib` **之前**设 `MPLCONFIGDIR` 指向项目内 `.cache/matplotlib`（`tools/plot.py` 已处理），并把 `.cache/` 加进 `.gitignore` |
+| 12 | 出图时中文标题全变成**方块** | matplotlib 默认字体不含中文 | `plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", ...]`，并关掉 `axes.unicode_minus`（负号也会变方块） |
+| 13 | 一次性实验脚本跑完，**仓库根目录多出一个 `tmpXXXXXXXX/`** | `tempfile.mkdtemp()` 在 `TMPDIR` / `TEMP` / `TMP` 都取不到时，会退而使用**当前工作目录** | 写实验脚本时 `tempfile.mkdtemp(dir=...)` 显式指定目录，别依赖环境变量（和坑 #11 是同一类"临时目录落到仓库里"的问题） |
 
 ---
 
@@ -504,14 +604,16 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 
 ### 4.3 TCP 通信系统（毕设核心）
 
-- [x] 协议编解码 + 粘包拆包（含单元测试）—— 帧 + 玩家快照已实现
+- [x] 协议编解码 + 粘包拆包（含单元测试）—— 帧 + **玩家/敌机/子弹/道具四类条目全部实现**
 - [x] asyncio TCP 服务端骨架 —— `server/main.py`
 - [ ] 房间系统
 - [x] 机器人客户端 —— 7a 观察者 + **7b 输入 / 心跳版**均完成
-- [x] **占位对象同步**（几个方块，先跑通通信）—— 服务端广播 + 客户端渲染均已完成
+- [x] **占位对象同步** —— 服务端广播 + 客户端渲染均已完成；**8a 起带占位敌机 / 子弹**
 - [x] 状态同步 + 客户端插值 —— 基础版：前后两帧线性插值（一帧滞后）；完整快照缓冲后续
 - [x] **上行链路：输入 + 心跳** —— 7b 完成（`C_INPUT` / `C_HEARTBEAT` / 15 s 超时，见 D-023）
-- [ ] 压测 + 对比实验（编码 / IO 模型 / 网络损伤 / **实体数影响 E9**）
+- [x] **数据采集链路** —— 8a 完成：占位实体（数量可配）+ 每秒 CSV + `tools/plot.py` 出图（D-024）
+- [ ] **跑 E9 六档位并出图** —— 8b；⚠️ 开工前先拍板「CPU 曲线要不要弯」（见 §2.14）
+- [ ] 其余对比实验（编码 E1 / IO 模型 E3 / 网络损伤 E4-E5 / 同步频率 E5）
 - [ ] Wireshark 抓包验证
 
 ### 4.4 待解决问题 ⚠️
@@ -557,8 +659,9 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 > 第 4 步 ✅（12 字节帧头）；第 5 步 ✅（asyncio + 20 Hz tick + 广播）；
 > 第 6 步 ✅ 2026-10-21（pygame 渲染 + 一帧线性插值，39 个测试）；
 > 第 7 步 7a ✅ 2026-10-22（观察者机器人：20/50 连接、42 个测试）；
-> 第 7 步 7b ✅ 2026-10-23（输入 + 心跳 + 超时 + 机器人输入版，**88 个测试**，见 D-023）；
-> **第 8 步「数据采集 + 压测实验」等你确认人话笔记（`notes/06`）后再开始。**
+> 第 7 步 7b ✅ 2026-10-23（输入 + 心跳 + 超时 + 机器人输入版，88 个测试，见 D-023）；
+> 第 8 步 8a ✅ 2026-10-24（占位实体 + 指标落盘 + 出图工具，**153 个测试**，见 D-024）；
+> **第 8 步 8b「跑 E9」等你拍板 §2.14 末尾那件事（CPU 曲线要不要弯）后再开始。**
 
 #### 教学原则（重要）
 
@@ -601,6 +704,7 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 | `04-render-interpolation-人话版.md` | 第 6 步 · pygame 渲染 + 插值 |
 | `05-bot-farm-人话版.md` | 第 7 步 7a · 观察者机器人 |
 | `06-input-heartbeat-人话版.md` | 第 7 步 7b · 输入 + 心跳 |
+| `07-placeholder-entities-人话版.md` | 第 8 步 8a · 占位实体 + 指标落盘 |
 
 **为什么这条规矩能救命**：答辩前要复习，看的是这些笔记，不是 3000 行代码。
 

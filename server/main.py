@@ -1,25 +1,22 @@
-"""阶段 1 · 第 7 步（7b）：asyncio 服务端 + 输入 + 心跳。
+"""阶段 1 · 第 8 步（8a）：服务端 + 占位实体 + 指标落盘。
 
-最小闭环（在 7a 的「连接 → 广播快照」之上补上客户端→服务端这条路）：
+在 7b（输入 + 心跳 + 超时）之上补两件事：
 
-    客户端连上来 → 服务端分配 player_id / color
-    → 客户端每 50 ms 发 C_INPUT(keys)、每 5 s 发 C_HEARTBEAT
-    → 服务端按 keys 移动该玩家（**服务端权威**，坐标不由客户端给，D-006）
-    → 每 50 ms 向所有客户端广播 S_SNAPSHOT
-    → 15 s 收不到任何消息就判定断线
+    1. **占位实体**：`--enemies N --bullets M` 开出一批「匀速直线飞」的敌机与子弹，
+       让 E9 的自变量（同屏实体数）存在。实体结构与协议条目与最终版本一致（D-010）
+    2. **指标落盘**：每秒把 tick 耗时 / 快照体积 / 收发流量 / CPU / 内存
+       追加写进 CSV，供 tools/plot.py 出图
 
 本步不做：
+    - 敌机 AI、碰撞、伤害、掉落、波次、BOSS（全在第 11 步）
     - 房间、认证（第 10 步）
-    - 防洪 ERR_RATE_LIMITED（等有认证和真实玩家再说）
-    - S_PLAYER_LEAVE (0x86)：D-012 已确立「快照是全量真相」，
-      玩家断开后不再出现在下一帧快照里，客户端自然就删掉他了，
-      事件同步留给游戏内容阶段（02 §5.3）
+    - S_PLAYER_LEAVE (0x86)：D-012 已确立「快照是全量真相」，事件同步留给游戏内容阶段
     - 慢客户端的独立发送队列（D-020 记的账，压测阶段再还）
 
 用法：
     .venv\\Scripts\\python.exe -X utf8 -m server.main
-    .venv\\Scripts\\python.exe -X utf8 -m server.main 9527 --timeout 5
-    .venv\\Scripts\\python.exe -X utf8 -m server.main --timeout 0 --no-stats
+    .venv\\Scripts\\python.exe -X utf8 -m server.main --enemies 30 --bullets 200 --scenario E9-e30-b200-01
+    .venv\\Scripts\\python.exe -X utf8 -m server.main --timeout 0 --no-stats --no-metrics
 """
 
 from __future__ import annotations
@@ -28,8 +25,10 @@ import argparse
 import asyncio
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from protocol.framing import (
+    HEADER,
     Frame,
     ProtocolError,
     recv_frame_async,
@@ -48,6 +47,8 @@ from protocol.messages import (
     unpack_keys,
 )
 from protocol.snapshot import PlayerSnapshot, pack_snapshot
+from server.entities import World
+from server.metrics import MetricsRecorder, write_scenario
 from server.movement import apply_input
 from server.stats import TickStats
 
@@ -64,8 +65,10 @@ HEARTBEAT_TIMEOUT = 15.0
 # 玩家会一直往左走到 15 s 超时被踢 —— 观感上是「幽灵移动」。
 INPUT_TTL = 0.5
 
-# 每秒打印一行 tick 耗时（20 个 tick 一个窗口）
+# 每秒一个统计窗口（20 个 tick），也是指标 CSV 的行频
 STATS_EVERY_TICKS = TICK_HZ
+
+DEFAULT_METRICS_PATH = "data/server_metrics.csv"
 
 
 @dataclass
@@ -86,13 +89,19 @@ class GameServer:
         timeout: float = HEARTBEAT_TIMEOUT,
         input_ttl: float = INPUT_TTL,
         stats: TickStats | None = None,
+        world: World | None = None,
+        metrics: MetricsRecorder | None = None,
+        print_stats: bool = True,
     ) -> None:
         self.clients: dict[int, Client] = {}
         self.next_id = 1
         self.tick = 0
         self.timeout = timeout
         self.input_ttl = input_ttl
-        self.stats = stats
+        self.stats = stats if stats is not None else TickStats()
+        self.world = world if world is not None else World()
+        self.metrics = metrics
+        self.print_stats_enabled = print_stats
 
     # ---------------------------------------------------------------- 连接
 
@@ -121,10 +130,11 @@ class GameServer:
 
             while True:
                 frame = await recv_frame_async(reader)
-                if frame is None:#断开就结束
+                if frame is None:
                     break
                 # 收到任何消息都算「这个连接还活着」，不只是心跳
                 client.last_recv_at = time.perf_counter()
+                self.stats.record_in_frame(HEADER.size + len(frame.payload))
                 await self.dispatch(client, frame)
         except ProtocolError as exc:
             # magic / version / length / 载荷长度错误。
@@ -134,7 +144,7 @@ class GameServer:
             # 客户端正常/强制断开；这是常态，不当作服务器错误
             pass
         finally:
-            # 唯一的清理点：超时判定只关 writer，实际清理只在这里做，
+            # **唯一的清理点**：超时判定只关 writer，实际清理只在这里做，
             # 避免两处都改 clients 字典（删两次 / 删错人）
             self.clients.pop(player_id, None)
             writer.close()
@@ -154,8 +164,6 @@ class GameServer:
             # 只记「按了什么」，不记坐标 —— 服务端权威（D-006）
             client.keys = unpack_keys(frame.payload)
             client.last_input_at = time.perf_counter()
-            if self.stats is not None:
-                self.stats.record_input()
 
         elif frame.msg_type == C_HEARTBEAT:
             client_time = unpack_heartbeat(frame.payload)
@@ -163,6 +171,7 @@ class GameServer:
             # 载荷再把 client_time 原样回显 —— 双重保险，且 RTT 不依赖两端时钟同步
             payload = pack_heartbeat_ack(client_time, now_ms())
             await send_frame_async(client.writer, S_HEARTBEAT_ACK, frame.seq, payload)
+            self.stats.record_out_frame(HEADER.size + len(payload))
 
     # ---------------------------------------------------------------- 逻辑帧
 
@@ -177,11 +186,7 @@ class GameServer:
         return client.keys
 
     def update_players(self, now: float) -> None:
-        """服务端权威（D-006）：按每个客户端最近上报的输入移动。
-
-        7a 的 sin 占位摆动在这里退役 —— 现在「有没有输入」是可观测的，
-        E9 实验要的正是「输入 → 位置变化」这条因果链。
-        """
+        """服务端权威（D-006）：按每个客户端最近上报的输入移动。"""
         for client in self.clients.values():
             keys = self.active_keys(client, now)
             client.x = apply_input(client.x, keys)
@@ -195,9 +200,7 @@ class GameServer:
         """
         if self.timeout <= 0:
             return []
-        return [
-            c for c in self.clients.values() if now - c.last_recv_at > self.timeout
-        ]
+        return [c for c in self.clients.values() if now - c.last_recv_at > self.timeout]
 
     def build_snapshot(self) -> bytes:
         players = [
@@ -212,19 +215,30 @@ class GameServer:
             )
             for client in sorted(self.clients.values(), key=lambda c: c.player_id)
         ]
-        return pack_snapshot(self.tick, players)
+        payload = pack_snapshot(
+            self.tick,
+            players,
+            enemies=self.world.snapshot_enemies(),
+            bullets=self.world.snapshot_bullets(),
+        )
+        self.stats.record_snapshot(len(payload))
+        return payload
 
     async def broadcast_snapshot(self) -> None:
         if not self.clients:
             return
 
         payload = self.build_snapshot()
+        size = HEADER.size + len(payload)
         for client in list(self.clients.values()):
             try:
                 await send_frame_async(client.writer, S_SNAPSHOT, self.tick, payload)
             except (ConnectionError, RuntimeError):
                 # 对端已经断开：移除即可，不刷屏
                 self.clients.pop(client.player_id, None)
+            else:
+                # 每个收件人各记一次 —— 那才是真实下行带宽
+                self.stats.record_out_frame(size)
 
     async def reap_timeouts(self) -> None:
         """每秒检查一次超时（不是每 tick —— 20 次/秒 × N 客户端全是无用功）。"""
@@ -236,15 +250,27 @@ class GameServer:
             # 只关 writer：真正的清理在 handle_client 的 finally
             client.writer.close()
 
-    def print_stats(self) -> None:
-        if self.stats is None:
+    def report_stats(self, stats: dict) -> None:
+        if not self.print_stats_enabled:
             return
-        stats = self.stats.flush()
+        enemies, bullets = self.world.counts()
         print(
             f"[server] tick {TICK_HZ} Hz | avg {stats['avg_ms']:.3f} ms | "
             f"p50 {stats['p50_ms']:.3f} ms | p95 {stats['p95_ms']:.3f} ms | "
             f"max {stats['max_ms']:.3f} ms | players {len(self.clients)} | "
-            f"in {stats['inputs']}/s"
+            f"e/b {enemies}/{bullets} | snap {stats['snapshot_bytes']} B | "
+            f"in {stats['packets_in']}/s"
+        )
+
+    def write_metrics(self, stats: dict) -> None:
+        if self.metrics is None:
+            return
+        enemies, bullets = self.world.counts()
+        self.metrics.write(
+            client_count=len(self.clients),
+            enemies=enemies,
+            bullets=bullets,
+            stats=stats,
         )
 
     async def tick_loop(self) -> None:
@@ -260,17 +286,19 @@ class GameServer:
             started = time.perf_counter()
             self.tick += 1
             self.update_players(started)
+            self.world.step([(c.player_id, c.x) for c in self.clients.values()])
             await self.broadcast_snapshot()
-            if self.stats is not None:
-                self.stats.record_tick(time.perf_counter() - started)
+            self.stats.record_tick(time.perf_counter() - started)
 
             if self.tick % STATS_EVERY_TICKS == 0:
                 await self.reap_timeouts()
-                self.print_stats()
+                window = self.stats.flush()
+                self.report_stats(window)
+                self.write_metrics(window)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="阶段 1 TCP 服务端（输入 + 心跳）")
+    parser = argparse.ArgumentParser(description="阶段 1 TCP 服务端（占位实体 + 指标）")
     parser.add_argument("port", nargs="?", type=int, default=PORT, help="监听端口")
     parser.add_argument(
         "--timeout",
@@ -279,18 +307,59 @@ def parse_args() -> argparse.Namespace:
         help="心跳超时秒数；0 = 关闭超时判定（做“纯广播”基线实验用）",
     )
     parser.add_argument(
-        "--no-stats", action="store_true", help="不打印每秒 tick 耗时"
+        "--enemies", type=int, default=0, help="占位敌机数量；0 = 不加（7b 行为）"
+    )
+    parser.add_argument("--bullets", type=int, default=0, help="占位子弹数量")
+    parser.add_argument(
+        "--seed", type=int, default=1, help="占位实体生成的随机种子（固定 = 可复现）"
+    )
+    parser.add_argument(
+        "--scenario", default="", help="场景 ID，写进指标每一行；默认 adhoc"
+    )
+    parser.add_argument("--metrics", default=DEFAULT_METRICS_PATH, help="指标 CSV 路径")
+    parser.add_argument("--no-metrics", action="store_true", help="不写指标 CSV")
+    parser.add_argument(
+        "--no-stats", action="store_true", help="不打印每秒统计（照旧写 CSV）"
     )
     return parser.parse_args()
 
 
 async def main(args: argparse.Namespace) -> None:
-    stats = None if args.no_stats else TickStats()
-    game = GameServer(timeout=args.timeout, stats=stats)
+    try:
+        world = World(
+            enemy_target=args.enemies, bullet_target=args.bullets, seed=args.seed
+        )
+    except ValueError as exc:
+        print(f"[server] 参数错误：{exc}")
+        raise SystemExit(2) from exc
+
+    metrics = None
+    if not args.no_metrics:
+        metrics = MetricsRecorder(args.metrics, scenario_id=args.scenario)
+        if args.scenario:
+            write_scenario(
+                Path(args.metrics).with_name("server_scenario.csv"),
+                args.scenario,
+                enemies=args.enemies,
+                bullets=args.bullets,
+                tick_rate=TICK_HZ,
+                seed=args.seed,
+            )
+        print(f"[server] metrics -> {args.metrics} (scenario={metrics.scenario_id})")
+
+    game = GameServer(
+        timeout=args.timeout,
+        world=world,
+        metrics=metrics,
+        print_stats=not args.no_stats,
+    )
 
     server = await asyncio.start_server(game.handle_client, HOST, args.port)
     timeout_text = f"{args.timeout:g}s" if args.timeout > 0 else "off"
-    print(f"[server] listening on {HOST}:{args.port} (timeout {timeout_text})")
+    print(
+        f"[server] listening on {HOST}:{args.port} (timeout {timeout_text}, "
+        f"enemies {args.enemies}, bullets {args.bullets}, seed {args.seed})"
+    )
 
     tick_task = asyncio.create_task(game.tick_loop())
     try:
@@ -302,6 +371,8 @@ async def main(args: argparse.Namespace) -> None:
             await tick_task
         except asyncio.CancelledError:
             pass
+        if metrics is not None:
+            metrics.close()
 
 
 if __name__ == "__main__":

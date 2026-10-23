@@ -49,6 +49,22 @@ KEY_LEFT = 0x01
 KEY_RIGHT = 0x02
 KEYS_MASK = KEY_LEFT | KEY_RIGHT
 
+# 实体类型（02 §4.5）。这里只定义当前用到的值，完整表见文档。
+ENEMY_DIVE = 0x01  # 直线俯冲（占位实体用的就是它）
+ENEMY_BOSS = 0xFF  # BOSS —— 用来推导快照头的 boss_present 标志
+
+BULLET_PLAYER_L1 = 0x01  # 玩家 Lv1 子弹
+BULLET_ENEMY_SPREAD = 0x11  # 敌方直线散射弹
+
+ITEM_POWER = 0x01  # 火力道具
+
+# 角度基准（02 §4.5）：0° = 正上方，顺时针增加。
+# 竖版飞机大战「向上」是主方向，所以 0 放在正上而不是数学习惯的正右。
+ANGLE_UP = 0
+ANGLE_RIGHT = 64
+ANGLE_DOWN = 128
+ANGLE_LEFT = 192
+
 _TIME_MASK = 0xFFFFFFFF
 
 

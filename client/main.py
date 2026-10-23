@@ -1,19 +1,23 @@
-"""阶段 1 · 第 7 步（7b）：pygame 客户端 + 键盘输入 + 心跳。
+"""阶段 1 · 第 8 步（8a）：pygame 客户端 + 实体渲染。
 
-做五件事：
+做六件事：
     1. 非阻塞网络：每帧 poll 一次，绝不卡住渲染（D-007）
     2. **键盘输入**：每 50 ms 发一次 C_INPUT，只发「按了什么键」，不发坐标（D-006）
     3. **心跳**：每 5 s 发一次 C_HEARTBEAT，HUD 上显示 RTT —— 让「心跳在工作」肉眼可见
     4. 插值：保存前后两帧快照，在 50 ms 内从旧位置线性过渡到新位置
-    5. 绘制：720×960 竖版窗口，占位方块 + 网格 + HUD
+    5. **实体渲染**：把快照里的敌机与子弹画出来（占位实体，见 server/entities.py）
+    6. 绘制：720×960 竖版窗口，占位方块 + 网格 + HUD
 
     ⚠️ 注意方向键现在是**输入**，不再是移动本地方块 ——
     你按左，是告诉服务端“我要往左”，服务端算完坐标再广播回来。
     所以屏幕上看到的是「一次往返之后」的结果。
 
 本步不做：
+    - **子弹的实体插值**：子弹条目没有唯一 ID（只有 owner_id），客户端没法把
+      这一帧的子弹和上一帧对应起来 —— 这是协议设计的结果，不是漏做
+      （见 protocol/snapshot.py 的说明）
     - 客户端预测（按下去要等一个 RTT + 一帧才看到动，第三梯队 F12）
-    - 房间、敌机、子弹、道具
+    - 房间、碰撞、伤害、道具
     - 断线自动重连
 
 用法：
@@ -56,6 +60,9 @@ GRID = (30, 36, 52)
 TEXT = (220, 226, 240)
 WHITE = (255, 255, 255)
 RED = (255, 120, 120)
+ENEMY_COLOR = (240, 96, 96)
+PLAYER_BULLET_COLOR = (140, 240, 255)
+ENEMY_BULLET_COLOR = (255, 176, 64)
 
 PALETTE = [
     (255, 99, 132),
@@ -112,7 +119,7 @@ def main() -> None:
     scale_y = height / WORLD_HEIGHT
 
     screen = pygame.display.set_mode((width, height))
-    pygame.display.set_caption("C/S 实时通信 · 输入 + 心跳")
+    pygame.display.set_caption("C/S 实时通信 · 输入 + 心跳 + 实体")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 18)
     big_font = pygame.font.SysFont("consolas", 24, bold=True)
@@ -132,6 +139,8 @@ def main() -> None:
     prev: dict = {}
     curr: dict = {}
     curr_time = 0.0
+    enemies: tuple = ()
+    bullets: tuple = ()
     keys = 0
     last_rtt = 0.0
     inputs_sent = 0
@@ -165,6 +174,9 @@ def main() -> None:
 
                     prev = dict(curr)
                     curr = {p.player_id: p for p in snapshot.players}
+                    # 实体直接取最近一帧，不参与插值（原因见模块开头）
+                    enemies = snapshot.enemies
+                    bullets = snapshot.bullets
                     curr_time = time.perf_counter()
                     tick = snapshot.tick
                 elif frame.msg_type == S_HEARTBEAT_ACK:
@@ -198,6 +210,40 @@ def main() -> None:
             screen.fill(BG)
             draw_grid(screen, width, height)
 
+            # 子弹：用 fill（最快的绘制原语）而不是 draw.rect / draw.circle，
+            # 因为 E9 会开到 800 颗，60 fps 下就是 4.8 万次/秒的绘制调用。
+            #
+            # ⚠️ 子弹**不做插值**：子弹条目没有唯一 ID（只有 owner_id），
+            # 客户端无法把这一帧的子弹和上一帧的对应起来（见 protocol/snapshot.py）。
+            # 这是协议设计的结果，不是漏做 —— 要平滑只能靠外推或延迟快照缓冲。
+            bullet_size = max(2, int(4 * min(scale_x, scale_y)))
+            for bullet in bullets:
+                color = (
+                    PLAYER_BULLET_COLOR if bullet.owner_id else ENEMY_BULLET_COLOR
+                )
+                screen.fill(
+                    color,
+                    (
+                        int(bullet.x * scale_x),
+                        int(bullet.y * scale_y),
+                        bullet_size,
+                        bullet_size,
+                    ),
+                )
+
+            # 敌机：快照里有 enemy_id，本来可以插值，但占位阶段量少且走得慢，
+            # 直接画最近一帧就够；画成朝下的三角（占位阶段敌机统一向下飞）
+            enemy_size = max(8, int(14 * min(scale_x, scale_y)))
+            half = enemy_size // 2
+            for enemy in enemies:
+                cx = int(enemy.x * scale_x)
+                cy = int(enemy.y * scale_y)
+                pygame.draw.polygon(
+                    screen,
+                    ENEMY_COLOR,
+                    [(cx, cy + half), (cx - half, cy - half), (cx + half, cy - half)],
+                )
+
             for player_id, player in curr.items():
                 old = prev.get(player_id, player)
                 x = lerp(old.x, player.x, alpha) * scale_x
@@ -218,7 +264,7 @@ def main() -> None:
             # 5) HUD：keys 显示你现在按住了什么，rtt 显示心跳往返耗时
             hud_line1 = (
                 f"tick={tick}  players={len(curr)}  you=P{my_id}  "
-                f"fps={clock.get_fps():.0f}"
+                f"e/b={len(enemies)}/{len(bullets)}  fps={clock.get_fps():.0f}"
             )
             hud_line2 = (
                 f"keys={keys:02b}  rtt={last_rtt * 1000:.2f}ms  "

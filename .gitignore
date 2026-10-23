@@ -14,3 +14,7 @@ debug.log
 # ---- 实验输出 ----
 bot_*.json
 metrics/
+data/
+
+# ---- 工具缓存（matplotlib 字体缓存等）----
+.cache/
