@@ -3,8 +3,8 @@
 > **新会话请先读这份文件**，再读 `DECISIONS.md`，即可接上全部上下文。
 > 维护约定：每次会话结束前更新本文件。
 
-最后更新：2026-10-22
-当前阶段：**阶段 1：第 7 步 7a「观察者机器人」完成 → 下一步：7b 输入 + heartbeat**
+最后更新：2026-10-23
+当前阶段：**阶段 1：第 7 步 7b「输入 + heartbeat」完成 → 下一步：第 8 步 数据采集 + 压测实验（E9 是核心）**
 
 ---
 
@@ -158,7 +158,8 @@ http_test.py    与游戏无关的 requests 测试
 
 ### 2.5 本文件所在目录
 
-`E:\PythonProject\docs\` —— `PROGRESS.md`（本文件）、`DECISIONS.md`
+`E:\PythonProject\docs\` —— `PROGRESS.md`（本文件）、`DECISIONS.md`、
+`01-系统架构.md` ~ `04-API接口设计.md`、`BACKLOG.md`、`notes\`（人话笔记，见 §4.5）
 
 ### 2.6 阶段 1 · 第 1 步：回声服务器（2026-10-19）
 
@@ -379,6 +380,64 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m bot.main --clients 20 --dur
 E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m bot.main --clients 50 --duration 5 --ramp 20 --out bot_50.json
 ```
 
+### 2.13 阶段 1 · 第 7 步 7b：输入 + heartbeat（2026-10-23）
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `protocol\world.py` | 🆕 新增 | 世界尺寸 720×960 / 边距 20（服务端边界与客户端缩放共用一份） |
+| `server\movement.py` | 🆕 新增 | 运动学纯函数：`keys_to_dx` / `clamp_x` / `apply_input` |
+| `server\stats.py` | 🆕 新增 | `TickStats`：tick 耗时 p50 / p95 + 每秒输入帧数 |
+| `bot\agent.py` | 🆕 新增 | 单个机器人：3 协程（收 / 输入 / 心跳）+ `BotConfig` / `BotResult` |
+| `protocol\messages.py` | ✏️ 修改 | `C_INPUT=0x06` / `C_HEARTBEAT=0x07` / `S_HEARTBEAT_ACK=0x87` + struct + `now_ms` / `rtt_ms` |
+| `server\main.py` | ✏️ 修改 | `dispatch` 分发、输入保质期、超时清理、tick 打点、argparse；**删掉 `sin` 占位摆动** |
+| `bot\main.py` | ✏️ 修改 | 新 CLI（`--input-hz` / `--heartbeat` / `--key-hold` / `--seed`）+ 新指标 |
+| `client\net.py` | ✏️ 修改 | `send()` / `flush()` 发送队列 + `MAX_OUTBOX`（7a 遗留 TODO） |
+| `client\main.py` | ✏️ 修改 | 键盘 → `C_INPUT`、心跳、HUD 显示 RTT / keys |
+| `client\console.py` | ✏️ 修改 | 加心跳（不加会被 15 s 超时踢）+ 打印 RTT |
+| `tests\test_input.py` | 🆕 新增 | 12 个用例：keys 编解码、保留位、输入保质期 |
+| `tests\test_heartbeat.py` | 🆕 新增 | 14 个用例：心跳编解码、32 位回绕 RTT、超时判定 |
+| `tests\test_movement.py` | 🆕 新增 | 11 个用例：左 / 右 / 同按 / 边界 / 确定性 |
+| `tests\test_tick_stats.py` | 🆕 新增 | 7 个用例：分位数、窗口重置 |
+| `tests\test_bot_metrics.py` | ✏️ 修改 | 覆盖新增的输入 / 心跳 / RTT 指标 |
+| `docs\notes\06-input-heartbeat-人话版.md` | 🆕 新增 | 人话笔记 |
+
+**7b 范围**：
+
+- 上行链路接通：`C_INPUT`（1 字节位掩码，**只发意图不发坐标**，D-006）
+- 服务端权威运动学：**整数 15 px/tick**（300 px/s）、左右同按抵消、边界钳制
+- **输入保质期 0.5 s**：太久没收到新输入即视为松手，防「幽灵移动」
+- 心跳：`C_HEARTBEAT` → `S_HEARTBEAT_ACK`，**原样回显 `client_time`**（RTT 不依赖两端对表）
+- 超时：15 s（3 × 心跳间隔），**每秒检查一次**；判定 / 关闭 / 清理三段分离
+- 机器人：`--input-hz 0` 就是 7a 的观察者；默认发心跳（否则会被踢）
+- 服务端每秒打印 tick 耗时 + 输入帧速率（E9 的数据源）
+- **不做**：房间、认证、防洪、`S_PLAYER_LEAVE`（D-012 全量真相已覆盖）、批量合并发送
+
+**验证记录**：
+
+- **88 个单元测试全部通过**（0.10 s；7a 时是 42 个）
+- 10 输入 bot / 8 s：**10/10**，1600 快照、1600 输入、20/20 心跳 ack，
+  间隔 p50 47.3 / p95 62.9 ms，RTT p50 0.0 / p95 1.0 ms，errors 0
+- 5 观察 bot（`--input-hz 0`）/ 6 s：598 快照、**0 输入**、10/10 ack，errors 0
+- 服务端 tick：空载 **0.005 ms**；5 观察 bot **0.256 ms**；10 输入 bot **0.33~0.38 ms**（p95 ≤ 0.47）
+- 服务端输入速率：10 bot × 20 Hz → **`in 198~203/s`**；观察者 `in 0/s`（对照成立）
+- **位移验证**：按左 1 s 位移 **−285 px**、按右 **+285 px**、左右同按 **0**、松手后连续 8 帧**完全静止**
+- **超时验证**：`--timeout 5` 下心跳 2 s → 活满 12 s；什么都不发 → 约 6 s 被踢
+- pygame 客户端（无头运行）：服务端统计 **`in 20/s`**，与设计一致
+- ⚠️ 以上是本机 loopback 数据，**不是最终网络实验数据**（D-016）
+
+**运行**：
+
+```powershell
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m client.main
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m bot.main --clients 20 --duration 10 --ramp 5
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m bot.main --clients 20 --duration 10 --input-hz 0
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main 9527 --timeout 5
+```
+
+> 想看两个方块都在动：开两个 `client.main` 窗口，各自按 ←/→。
+> 想复现 7a 的「纯广播基线」：服务端 `--timeout 0` + 机器人 `--input-hz 0 --heartbeat 0`。
+
 ---
 
 ## 3. 已踩过的坑（重要，别再踩）
@@ -393,6 +452,8 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m bot.main --clients 50 --dur
 | 6 | `mysql` 命令找不到 | MySQL `bin` 目录不在 PATH（按要求未改环境变量） | 用全路径调用 |
 | 7 | 连**本机局域网 IP**，RTT 仍 < 1 ms、传输速度 1000+ MB/s | Windows 把发往本机地址的流量**短路到回环**，不经过网卡 | 用网卡计数器验证：传 16 MB 后 WLAN 收发增量≈0；真实网络实验需虚拟机/第二台设备（见 D-016） |
 | 8 | `python server\echo_server.py` 报 `ModuleNotFoundError: No module named 'protocol'` | 直接跑脚本时 `sys.path[0]` 是脚本目录（`server\`），不是项目根 | 从项目根用 `python -m server.echo_server` 运行 |
+| 9 | 后台 / 管道运行服务端时，`print` 的日志迟迟看不到 | Python 的 stdout 在**非终端**下是块缓冲（攒满才刷）；日志量小就一直不刷 | 加 `-u`（`python -X utf8 -u -m server.main`）；这也是 §2.7 提过 `-X utf8` 要配合的场景 |
+| 10 | 写验证脚本时「等 0.1 s 没有数据就算读干净」**死循环** | 快照每 50 ms 一帧，**永远不会有 100 ms 静默** | 判断「流停了」不能用「静默超时」；改成固定时长（如读 0.7 s 再丢弃），或按 tick 号判断 |
 
 ---
 
@@ -446,9 +507,10 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 - [x] 协议编解码 + 粘包拆包（含单元测试）—— 帧 + 玩家快照已实现
 - [x] asyncio TCP 服务端骨架 —— `server/main.py`
 - [ ] 房间系统
-- [x] 机器人客户端 —— 7a 观察者版完成；7b 输入 + heartbeat 待做
+- [x] 机器人客户端 —— 7a 观察者 + **7b 输入 / 心跳版**均完成
 - [x] **占位对象同步**（几个方块，先跑通通信）—— 服务端广播 + 客户端渲染均已完成
 - [x] 状态同步 + 客户端插值 —— 基础版：前后两帧线性插值（一帧滞后）；完整快照缓冲后续
+- [x] **上行链路：输入 + 心跳** —— 7b 完成（`C_INPUT` / `C_HEARTBEAT` / 15 s 超时，见 D-023）
 - [ ] 压测 + 对比实验（编码 / IO 模型 / 网络损伤 / **实体数影响 E9**）
 - [ ] Wireshark 抓包验证
 
@@ -495,7 +557,8 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 > 第 4 步 ✅（12 字节帧头）；第 5 步 ✅（asyncio + 20 Hz tick + 广播）；
 > 第 6 步 ✅ 2026-10-21（pygame 渲染 + 一帧线性插值，39 个测试）；
 > 第 7 步 7a ✅ 2026-10-22（观察者机器人：20/50 连接、42 个测试）；
-> **7b「输入 + heartbeat」等你确认人话笔记后再开始。**
+> 第 7 步 7b ✅ 2026-10-23（输入 + 心跳 + 超时 + 机器人输入版，**88 个测试**，见 D-023）；
+> **第 8 步「数据采集 + 压测实验」等你确认人话笔记（`notes/06`）后再开始。**
 
 #### 教学原则（重要）
 
@@ -527,7 +590,17 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 > 这是毕设最常见的死法 —— 硬撑到第 15 周才崩就救不回来了。
 > **第 3 步发现、还有 17 周可修，是最好的时机。**
 
-**已有笔记**：`docs/notes/01-framing-人话版.md`（第 2~3 步，已验证 15 个测试全过）
+**已有笔记**（`docs/notes/`）：
+
+| 笔记 | 对应步骤 |
+|---|---|
+| `00-答辩速查.md` | 答辩前速查 |
+| `01-framing-人话版.md` | 第 2~3 步 · 长度前缀 + 帧边界测试 |
+| `02-12byte-header-人话版.md` | 第 4 步 · 12 字节帧头 |
+| `03-tick-broadcast-人话版.md` | 第 5 步 · asyncio + 20 Hz tick + 广播 |
+| `04-render-interpolation-人话版.md` | 第 6 步 · pygame 渲染 + 插值 |
+| `05-bot-farm-人话版.md` | 第 7 步 7a · 观察者机器人 |
+| `06-input-heartbeat-人话版.md` | 第 7 步 7b · 输入 + 心跳 |
 
 **为什么这条规矩能救命**：答辩前要复习，看的是这些笔记，不是 3000 行代码。
 

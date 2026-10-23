@@ -1,15 +1,22 @@
-"""阶段 1 · 第 7 步（7a）：观察者机器人。
+"""阶段 1 · 第 7 步：机器人农场（CLI + 指标汇总）。
 
-一个进程开 N 个“假客户端”：连接、收 welcome、收 snapshot、统计指标。
-本阶段**不发输入、不改服务端**，只验证：
+一个进程开 N 个“假客户端”，用于压测与实验数据采集。
+单个机器人的逻辑在 bot/agent.py（连接、输入、心跳、收发），本文件只负责
+**开多少个、怎么开、跑完怎么汇总**。
 
-    - N 个连接能不能同时连上
-    - 每个机器人是不是稳定收到 20 Hz 快照
-    - 广播的带宽 / 间隔 / 错误数
+    --input-hz 0   就是 7a 的观察者机器人（只收不发）
+    --input-hz 20  是 7b 的输入机器人（默认）
+
+7b 起机器人**默认发心跳**：服务端有 15 秒超时（02 §7），不发心跳的客户端
+15 秒后会被踢。想复现 7a 的「纯广播基线」就两边一起关：
+
+    server:  python -m server.main --timeout 0
+    bot:     python -m bot.main --clients 50 --duration 60 --input-hz 0 --heartbeat 0
 
 用法：
     .venv\\Scripts\\python.exe -X utf8 -m bot.main --clients 20 --duration 10 --ramp 5
     .venv\\Scripts\\python.exe -X utf8 -m bot.main --clients 50 --duration 60 --out bot_run.json
+    .venv\\Scripts\\python.exe -X utf8 -m bot.main --input-hz 0 --heartbeat 0 --timeout 0
 """
 
 from __future__ import annotations
@@ -18,87 +25,11 @@ import argparse
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
-from protocol.framing import HEADER, ProtocolError, recv_frame_async
-from protocol.messages import S_SNAPSHOT, S_WELCOME
+from bot.agent import BotConfig, BotResult, run_farm
 
-
-@dataclass
-class BotResult:
-    connected: bool = False
-    snapshots: int = 0
-    bytes: int = 0
-    intervals: list[float] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
-
-
-async def run_bot(host: str, port: int, duration: float) -> BotResult:
-    """一个观察者机器人：连接后只收快照，不发送任何消息。"""
-    result = BotResult()
-
-    try:
-        reader, writer = await asyncio.open_connection(host, port)
-        result.connected = True
-
-        try:
-            welcome = await recv_frame_async(reader)
-            if welcome is None or welcome.msg_type != S_WELCOME:
-                result.errors.append("no S_WELCOME")
-                return result
-
-            deadline = time.perf_counter() + duration
-            last_snapshot_at = None
-
-            while True:
-                remaining = deadline - time.perf_counter()
-                if remaining <= 0:
-                    break
-
-                try:
-                    frame = await asyncio.wait_for(
-                        recv_frame_async(reader), timeout=remaining
-                    )
-                except asyncio.TimeoutError:
-                    break
-
-                if frame is None:
-                    result.errors.append("server closed")
-                    break
-                if frame.msg_type != S_SNAPSHOT:
-                    continue
-
-                now = time.perf_counter()
-                if last_snapshot_at is not None:
-                    result.intervals.append(now - last_snapshot_at)
-                last_snapshot_at = now
-
-                result.snapshots += 1
-                result.bytes += HEADER.size + len(frame.payload)
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except (ConnectionError, RuntimeError):
-                pass
-
-    except (OSError, ProtocolError) as exc:
-        result.errors.append(repr(exc))
-
-    return result
-
-
-async def run_farm(args: argparse.Namespace) -> list[BotResult]:
-    """按 ramp 速率启动 N 个机器人，等它们全部结束。"""
-    tasks = []
-    for _ in range(args.clients):
-        tasks.append(
-            asyncio.create_task(run_bot(args.host, args.port, args.duration))
-        )
-        if args.ramp > 0:
-            await asyncio.sleep(1.0 / args.ramp)
-    return await asyncio.gather(*tasks)
+__all__ = ["BotConfig", "BotResult", "percentile", "summarize", "main"]
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -111,36 +42,53 @@ def percentile(values: list[float], p: float) -> float:
 
 
 def summarize(
-    results: list[BotResult], args: argparse.Namespace, elapsed: float
+    results: list[BotResult],
+    config: BotConfig,
+    clients: int,
+    ramp: float,
+    elapsed: float,
 ) -> dict:
     connected = sum(1 for r in results if r.connected)
     snapshots = sum(r.snapshots for r in results)
     total_bytes = sum(r.bytes for r in results)
     intervals = [value for r in results for value in r.intervals]
+    rtts = [value for r in results for value in r.rtts]
     errors = [error for r in results for error in r.errors]
+    inputs_sent = sum(r.inputs_sent for r in results)
+    heartbeats_sent = sum(r.heartbeats_sent for r in results)
+    heartbeats_acked = sum(r.heartbeats_acked for r in results)
 
     return {
-        "host": args.host,
-        "port": args.port,
-        "clients_requested": args.clients,
+        "host": config.host,
+        "port": config.port,
+        "clients_requested": clients,
         "clients_connected": connected,
-        "duration_per_bot_s": args.duration,
-        "ramp_per_s": args.ramp,
+        "duration_per_bot_s": config.duration,
+        "ramp_per_s": ramp,
+        "input_hz": config.input_hz,
+        "heartbeat_s": config.heartbeat,
+        "seed": config.seed,
         "elapsed_s": round(elapsed, 3),
         "snapshots": snapshots,
         "snapshots_per_s": round(snapshots / elapsed, 2) if elapsed else 0,
         "bytes": total_bytes,
         "bytes_per_s": round(total_bytes / elapsed, 2) if elapsed else 0,
         "avg_snapshots_per_bot": round(snapshots / connected, 2) if connected else 0,
+        "inputs_sent": inputs_sent,
+        "inputs_per_s": round(inputs_sent / elapsed, 2) if elapsed else 0,
+        "heartbeats_sent": heartbeats_sent,
+        "heartbeats_acked": heartbeats_acked,
         "interval_p50_ms": round(percentile(intervals, 0.50) * 1000, 3),
         "interval_p95_ms": round(percentile(intervals, 0.95) * 1000, 3),
+        "rtt_p50_ms": round(percentile(rtts, 0.50) * 1000, 3),
+        "rtt_p95_ms": round(percentile(rtts, 0.95) * 1000, 3),
         "errors": len(errors),
         "error_samples": errors[:5],
     }
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="阶段 1 观察者机器人")
+    parser = argparse.ArgumentParser(description="阶段 1 机器人（输入 + 心跳）")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9527)
     parser.add_argument("--clients", type=int, default=20, help="机器人数量")
@@ -150,16 +98,44 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ramp", type=float, default=5.0, help="每秒启动几个；0 表示一次性全部启动"
     )
+    parser.add_argument(
+        "--input-hz",
+        type=float,
+        default=20.0,
+        help="每个机器人每秒发几次 C_INPUT；0 = 观察者（不发输入）",
+    )
+    parser.add_argument(
+        "--heartbeat",
+        type=float,
+        default=5.0,
+        help="心跳间隔秒数；0 = 不发（需服务端 --timeout 0，否则会被踢）",
+    )
+    parser.add_argument(
+        "--key-hold", type=float, default=0.5, help="一个按键按住多久才换"
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0, help="按键随机种子；0 = 系统随机，非 0 = 可复现"
+    )
     parser.add_argument("--out", default="", help="把汇总写到 JSON 文件")
     return parser.parse_args()
 
 
 async def async_main(args: argparse.Namespace) -> None:
+    config = BotConfig(
+        host=args.host,
+        port=args.port,
+        duration=args.duration,
+        input_hz=args.input_hz,
+        heartbeat=args.heartbeat,
+        key_hold=args.key_hold,
+        seed=args.seed,
+    )
+
     started = time.perf_counter()
-    results = await run_farm(args)
+    results = await run_farm(config, args.clients, args.ramp)
     elapsed = time.perf_counter() - started
 
-    summary = summarize(results, args, elapsed)
+    summary = summarize(results, config, args.clients, args.ramp, elapsed)
     text = json.dumps(summary, ensure_ascii=False, indent=2)
     print(text)
 
@@ -170,8 +146,12 @@ async def async_main(args: argparse.Namespace) -> None:
         print(f"[bot] summary written to {path}")
 
 
-if __name__ == "__main__":
+def main() -> None:
     try:
         asyncio.run(async_main(parse_args()))
     except KeyboardInterrupt:
         print("\n[bot] stopped")
+
+
+if __name__ == "__main__":
+    main()

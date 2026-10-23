@@ -1,14 +1,20 @@
-"""阶段 1 · 第 6 步：pygame 占位客户端 + 插值。
+"""阶段 1 · 第 7 步（7b）：pygame 客户端 + 键盘输入 + 心跳。
 
-做三件事：
+做五件事：
     1. 非阻塞网络：每帧 poll 一次，绝不卡住渲染（D-007）
-    2. 插值：保存前后两帧快照，在 50 ms 内从旧位置线性过渡到新位置
-    3. 绘制：720×960 竖版窗口，占位方块 + 网格 + HUD
+    2. **键盘输入**：每 50 ms 发一次 C_INPUT，只发「按了什么键」，不发坐标（D-006）
+    3. **心跳**：每 5 s 发一次 C_HEARTBEAT，HUD 上显示 RTT —— 让「心跳在工作」肉眼可见
+    4. 插值：保存前后两帧快照，在 50 ms 内从旧位置线性过渡到新位置
+    5. 绘制：720×960 竖版窗口，占位方块 + 网格 + HUD
+
+    ⚠️ 注意方向键现在是**输入**，不再是移动本地方块 ——
+    你按左，是告诉服务端“我要往左”，服务端算完坐标再广播回来。
+    所以屏幕上看到的是「一次往返之后」的结果。
 
 本步不做：
-    - 键盘输入（服务端还不处理 C_INPUT）
+    - 客户端预测（按下去要等一个 RTT + 一帧才看到动，第三梯队 F12）
     - 房间、敌机、子弹、道具
-    - 真正的快照延迟缓冲（现在是“上一帧 → 当前帧”的一帧插值）
+    - 断线自动重连
 
 用法：
     .venv\\Scripts\\python.exe -X utf8 -m client.main
@@ -22,13 +28,28 @@ import pygame
 
 from client.net import NetworkClient
 from protocol.framing import ProtocolError
-from protocol.messages import S_SNAPSHOT, S_WELCOME, WELCOME
+from protocol.messages import (
+    C_HEARTBEAT,
+    C_INPUT,
+    KEY_LEFT,
+    KEY_RIGHT,
+    S_HEARTBEAT_ACK,
+    S_SNAPSHOT,
+    S_WELCOME,
+    WELCOME,
+    now_ms,
+    pack_heartbeat,
+    pack_keys,
+    rtt_ms,
+    unpack_heartbeat_ack,
+)
 from protocol.snapshot import unpack_snapshot
+from protocol.world import WORLD_HEIGHT, WORLD_WIDTH
 
-WORLD_WIDTH = 720
-WORLD_HEIGHT = 960
 FPS = 60
 TICK_INTERVAL = 0.05  # 20 Hz 快照间隔
+INPUT_INTERVAL = 0.05  # 20 Hz，与 tick 同频（定频发送，天然冗余）
+HEARTBEAT_INTERVAL = 5.0  # 02 §7
 
 BG = (16, 20, 32)
 GRID = (30, 36, 52)
@@ -60,6 +81,21 @@ def draw_grid(screen: pygame.Surface, width: int, height: int) -> None:
         pygame.draw.line(screen, GRID, (0, y), (width, y))
 
 
+def read_keys() -> int:
+    """把键盘状态翻译成协议里的输入位掩码（02 §4.5）。
+
+    读的是「当前按住什么」而不是「刚刚按了哪个键」——
+    定频发送要的就是状态，不是事件（丢一帧下一帧自动补上）。
+    """
+    pressed = pygame.key.get_pressed()
+    keys = 0
+    if pressed[pygame.K_LEFT] or pressed[pygame.K_a]:
+        keys |= KEY_LEFT
+    if pressed[pygame.K_RIGHT] or pressed[pygame.K_d]:
+        keys |= KEY_RIGHT
+    return keys
+
+
 def main() -> None:
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 9527
@@ -76,7 +112,7 @@ def main() -> None:
     scale_y = height / WORLD_HEIGHT
 
     screen = pygame.display.set_mode((width, height))
-    pygame.display.set_caption("C/S 实时通信 · 占位方块")
+    pygame.display.set_caption("C/S 实时通信 · 输入 + 心跳")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 18)
     big_font = pygame.font.SysFont("consolas", 24, bold=True)
@@ -89,13 +125,23 @@ def main() -> None:
         return
 
     print(f"[client] connected to {host}:{port}; window {width}x{height}")
+    print("[client] ←/→ 或 A/D 移动；ESC 退出")
 
     my_id = 0
     tick = 0
     prev: dict = {}
     curr: dict = {}
     curr_time = 0.0
+    keys = 0
+    last_rtt = 0.0
+    inputs_sent = 0
+    heartbeats_sent = 0
+    heartbeats_acked = 0
     running = True
+
+    now = time.perf_counter()
+    next_input_at = now
+    next_heartbeat_at = now
 
     try:
         while running:
@@ -121,12 +167,34 @@ def main() -> None:
                     curr = {p.player_id: p for p in snapshot.players}
                     curr_time = time.perf_counter()
                     tick = snapshot.tick
+                elif frame.msg_type == S_HEARTBEAT_ACK:
+                    client_time, _server_time = unpack_heartbeat_ack(frame.payload)
+                    # 回显的 client_time 是我们自己写的，所以 RTT 不需要两端对表
+                    last_rtt = rtt_ms(client_time) / 1000.0
+                    heartbeats_acked += 1
 
             # 2) 计算插值系数：新快照到达后的 50 ms 内 0 → 1
             now = time.perf_counter()
             alpha = min(1.0, (now - curr_time) / TICK_INTERVAL) if curr else 0.0
 
-            # 3) 绘制
+            # 3) 定频上报输入 + 定时心跳（都是「排进队列」，真正的发送在下一帧 poll）
+            #
+            # 用「deadline 累加」（next += 间隔）而不是「now + 间隔」：
+            # 后者会把上报频率量化到帧率上（60 fps 下 50 ms 不是 16.7 ms 的整数倍，
+            # 实测只有约 17 次/秒），前者平均频率准，而且每个渲染帧最多补发一帧，
+            # 不会因为卡顿而突发。服务端的 tick_loop 用的是同一个模式。
+            keys = read_keys()
+            if net.connected and now >= next_input_at:
+                net.send(C_INPUT, pack_keys(keys))
+                inputs_sent += 1
+                next_input_at += INPUT_INTERVAL
+
+            if net.connected and now >= next_heartbeat_at:
+                net.send(C_HEARTBEAT, pack_heartbeat(now_ms()))
+                heartbeats_sent += 1
+                next_heartbeat_at += HEARTBEAT_INTERVAL
+
+            # 4) 绘制
             screen.fill(BG)
             draw_grid(screen, width, height)
 
@@ -147,13 +215,20 @@ def main() -> None:
                 label = font.render(f"P{player_id}", True, TEXT)
                 screen.blit(label, (rect.centerx - label.get_width() // 2, rect.top - 20))
 
-            # 4) HUD
-            state = "connected" if net.connected else f"disconnected: {net.last_error}"
-            hud = (
-                f"tick={tick}  players={len(curr)}  fps={clock.get_fps():.0f}  "
-                f"you=P{my_id}  {state}"
+            # 5) HUD：keys 显示你现在按住了什么，rtt 显示心跳往返耗时
+            hud_line1 = (
+                f"tick={tick}  players={len(curr)}  you=P{my_id}  "
+                f"fps={clock.get_fps():.0f}"
             )
-            screen.blit(font.render(hud, True, TEXT), (12, 10))
+            hud_line2 = (
+                f"keys={keys:02b}  rtt={last_rtt * 1000:.2f}ms  "
+                f"in={inputs_sent}  hb={heartbeats_acked}/{heartbeats_sent}"
+            )
+            screen.blit(font.render(hud_line1, True, TEXT), (12, 10))
+            screen.blit(font.render(hud_line2, True, TEXT), (12, 34))
+
+            state = "connected" if net.connected else f"disconnected: {net.last_error}"
+            screen.blit(font.render(state, True, TEXT), (12, 58))
 
             if not curr:
                 waiting = big_font.render("waiting for snapshot...", True, TEXT)
