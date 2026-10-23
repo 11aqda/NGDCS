@@ -3,8 +3,8 @@
 > **新会话请先读这份文件**，再读 `DECISIONS.md`，即可接上全部上下文。
 > 维护约定：每次会话结束前更新本文件。
 
-最后更新：2026-10-21
-当前阶段：**阶段 1：第 6 步「pygame 渲染 + 插值」已实现 → 等你确认人话笔记后进入第 7 步（机器人客户端）**
+最后更新：2026-10-22
+当前阶段：**阶段 1：第 7 步 7a「观察者机器人」完成 → 下一步：7b 输入 + heartbeat**
 
 ---
 
@@ -53,7 +53,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install <包名> -i https://pyp
 | 缓存 | Redis 服务端 | 5.0.14.1，已解压到 `D:\Tools\Redis`（**未启动**） |
 | 接口调试 | Apifox | 2.8.50，已装于 `D:\Apps\Apifox` |
 | 虚拟化 | VMware Workstation + Ubuntu Desktop | 已装；**仅用 VMnet1 仅主机模式**，桥接 WiFi 已实测不可用（D-016） |
-| 仓库 | Git | `master` 分支，已提交 18 次 |
+| 仓库 | Git | `master` 分支，已提交 19 次 |
 
 **venv 已装 16 个包：**
 ```
@@ -138,7 +138,7 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install matplotlib psutil djang
 - 位置：`E:\PythonProject\.git`
 - 分支：`master`
 - 首次提交：`31f881d chore: 初始化仓库，加入 pygame 飞机游戏源码与素材`
-- 已跟踪 45 个文件（代码 + 文档 + 素材）
+- 已跟踪 49 个文件（代码 + 文档 + 素材）
 - 远端：无（纯本地）
 - `.gitignore` 内容：`.venv/`、`__pycache__/`、`.idea/`、`*.pyc`
 
@@ -346,6 +346,39 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m client.console Bob 10
 
 > 想看两个方块：开两个 `client.main` 窗口，或一个 `client.main` + 一个 `client.console`。
 
+### 2.12 阶段 1 · 第 7 步 7a：观察者机器人（2026-10-22）
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `bot\main.py` | 🆕 新增 | asyncio 机器人农场；N 个连接；ramp-up；指标汇总 |
+| `bot\__init__.py` | 🆕 新增 | 机器人包 |
+| `tests\test_bot_metrics.py` | 🆕 新增 | 3 个指标汇总用例 |
+| `server\main.py` | ✏️ 修改 | 客户端断开不再打印 error，只保留 joined / left |
+| `docs\notes\05-bot-farm-人话版.md` | 🆕 新增 | 人话笔记 |
+
+**7a 范围**：
+
+- 一个进程开 N 个观察者 bot：连接 → 收 welcome → 收 snapshot
+- CLI：`--clients` / `--duration` / `--ramp` / `--out`
+- 指标：连接数、快照数、字节数、间隔 p50 / p95、错误数
+- **不发输入、不改服务端协议**；7b 再加 `C_INPUT` + heartbeat
+
+**验证记录**：
+
+- 42 个单元测试全部通过（`0.141 s`）
+- 20 bots / 5 s / ramp 10：**20/20**，1996 快照，p50 47.3 ms，p95 62.9 ms，errors 0
+- 50 bots / 5 s / ramp 20：**50/50**，4988 快照，p50 47.5 ms，p95 63.1 ms，errors 0
+- 10 bots 快速回归：598 快照，errors 0；服务端日志只有 joined / left
+- ⚠️ 以上是本机 loopback 数据，**不是最终网络实验数据**（D-016）
+
+**运行**：
+
+```powershell
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m bot.main --clients 20 --duration 10 --ramp 5
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m bot.main --clients 50 --duration 5 --ramp 20 --out bot_50.json
+```
+
 ---
 
 ## 3. 已踩过的坑（重要，别再踩）
@@ -413,7 +446,7 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 - [x] 协议编解码 + 粘包拆包（含单元测试）—— 帧 + 玩家快照已实现
 - [x] asyncio TCP 服务端骨架 —— `server/main.py`
 - [ ] 房间系统
-- [ ] 机器人客户端
+- [x] 机器人客户端 —— 7a 观察者版完成；7b 输入 + heartbeat 待做
 - [x] **占位对象同步**（几个方块，先跑通通信）—— 服务端广播 + 客户端渲染均已完成
 - [x] 状态同步 + 客户端插值 —— 基础版：前后两帧线性插值（一帧滞后）；完整快照缓冲后续
 - [ ] 压测 + 对比实验（编码 / IO 模型 / 网络损伤 / **实体数影响 E9**）
@@ -461,7 +494,8 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 > **进度**：第 1 步 ✅（回声服务器）；第 2 步 ✅（长度前缀）；第 3 步 ✅（帧边界测试）；
 > 第 4 步 ✅（12 字节帧头）；第 5 步 ✅（asyncio + 20 Hz tick + 广播）；
 > 第 6 步 ✅ 2026-10-21（pygame 渲染 + 一帧线性插值，39 个测试）；
-> **第 7 步「机器人客户端」等你确认人话笔记后再开始。**
+> 第 7 步 7a ✅ 2026-10-22（观察者机器人：20/50 连接、42 个测试）；
+> **7b「输入 + heartbeat」等你确认人话笔记后再开始。**
 
 #### 教学原则（重要）
 

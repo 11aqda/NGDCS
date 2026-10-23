@@ -10,3 +10,7 @@ __pycache__/
 
 # ---- 本地日志 / 临时文件 ----
 debug.log
+
+# ---- 实验输出 ----
+bot_*.json
+metrics/

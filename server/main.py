@@ -74,8 +74,13 @@ class GameServer:
                 frame = await recv_frame_async(reader)
                 if frame is None:
                     break
-        except (ProtocolError, ConnectionError, RuntimeError) as exc:
-            print(f"[server] player {player_id} error: {exc}")
+        except ProtocolError as exc:
+            # magic / version / length 错误或帧被截断。
+            # 此时字节流已经不可信，必须断开。
+            print(f"[server] protocol error: {exc}")
+        except (ConnectionError, RuntimeError):
+            # 客户端正常/强制断开；这是常态，不当作服务器错误
+            pass
         finally:
             self.clients.pop(player_id, None)
             writer.close()
@@ -114,8 +119,8 @@ class GameServer:
         for client in list(self.clients.values()):
             try:
                 await send_frame_async(client.writer, S_SNAPSHOT, self.tick, payload)
-            except (ConnectionError, RuntimeError) as exc:
-                print(f"[server] player {client.player_id} send failed: {exc}")
+            except (ConnectionError, RuntimeError):
+                # 对端已经断开：移除即可，不刷屏
                 self.clients.pop(client.player_id, None)
 
     async def tick_loop(self) -> None:
