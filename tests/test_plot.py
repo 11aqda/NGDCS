@@ -35,6 +35,9 @@ def make_row(
     """造一行**已经解析过**的数据 —— 形状与 load_rows() 的输出一致。
 
     写进 CSV 时 csv 模块会自己转成字符串；用来直接调 summarize() 时就是数字。
+
+    四段默认按 1:6:2:1 分摊 tick_ms（碰撞占大头），
+    这样它们的和**正好等于** tick_ms —— 和真实采集端的恒等式一致。
     """
     return {
         "timestamp": "2026-10-24T01:00:00",
@@ -46,6 +49,11 @@ def make_row(
         "tick_ms_avg": tick_ms,
         "tick_ms_p95": tick_ms * 1.5,
         "tick_ms_max": tick_ms * 2,
+        "sim_ms": tick_ms * 0.1,
+        "collision_ms": tick_ms * 0.6,
+        "ser_ms": tick_ms * 0.2,
+        "net_ms": tick_ms * 0.1,
+        "hits": 0,
         "snapshot_bytes": snapshot_bytes,
         "cpu_percent": cpu_percent,
         "mem_mb": 60.0,
@@ -136,6 +144,31 @@ class SummarizeTest(unittest.TestCase):
     def test_empty_rows(self):
         self.assertEqual(summarize([]), {})
 
+    def test_logic_and_comms_are_split(self):
+        # 用户的核心要求：碰撞（逻辑侧）与通信侧必须能分开看
+        rows = [
+            {**make_row("s1", float(t), tick_ms=10.0), "t_mono": float(t)}
+            for t in range(5)
+        ]
+        summary = summarize(rows, warmup_s=0.0)
+
+        self.assertAlmostEqual(summary["sim_ms"], 1.0, places=3)
+        self.assertAlmostEqual(summary["collision_ms"], 6.0, places=3)
+        self.assertAlmostEqual(summary["ser_ms"], 2.0, places=3)
+        self.assertAlmostEqual(summary["net_ms"], 1.0, places=3)
+        # 逻辑 = sim + collision = 7；通信 = ser + net = 3
+        self.assertAlmostEqual(summary["logic_ms"], 7.0, places=3)
+        self.assertAlmostEqual(summary["comms_ms"], 3.0, places=3)
+        # 四段相加等于总耗时（堆叠图能画成 100% 的前提）
+        self.assertAlmostEqual(summary["logic_ms"] + summary["comms_ms"], 10.0, places=3)
+
+    def test_hits_are_summarized(self):
+        rows = [
+            {**make_row("s1", float(t)), "t_mono": float(t), "hits": 12}
+            for t in range(4)
+        ]
+        self.assertAlmostEqual(summarize(rows, warmup_s=0.0)["hits"], 12.0)
+
 
 class SeriesTest(unittest.TestCase):
     def test_groups_by_scenario(self):
@@ -167,7 +200,7 @@ class PlotSmokeTest(unittest.TestCase):
         self.csv_path = self.dir / "server_metrics.csv"
         self.out_dir = self.dir / "figures"
 
-    def test_writes_three_figures(self):
+    def test_writes_four_figures(self):
         rows = []
         for scenario_id, enemies, bullets in (
             ("E9-e10-b50", 10, 50),
@@ -194,7 +227,10 @@ class PlotSmokeTest(unittest.TestCase):
         series = series_from_groups(group_by_scenario(load_rows(self.csv_path)), 10.0)
         written = plot_e9(series, self.out_dir)
 
-        self.assertEqual(len(written), 3)
+        self.assertEqual(len(written), 4)
+        names = {path.name for path in written}
+        self.assertIn("fig6-17-entities-vs-tick.png", names)
+        self.assertIn("fig6-20-time-composition.png", names)
         for path in written:
             self.assertTrue(path.exists(), path)
             self.assertGreater(path.stat().st_size, 0, path)

@@ -1,8 +1,19 @@
-"""读指标 CSV 出图 —— E9 的图 6-17 / 6-18 / 6-19。
+"""读指标 CSV 出图 —— E9 的图 6-17 / 6-18 / 6-19 / 6-20。
 
 E9 是「实体数 → 带宽 / CPU」的核心实验（`03-实验清单.md §5`），
-这三张图直接支撑「同屏敌机上限 = 30、子弹上限 = 300」这个设计决策（D-011），
+这几张图直接支撑「同屏敌机上限 = 30、子弹上限 = 300」这个设计决策（D-011），
 构成「设计 → 实测 → 反推约束」的闭环。
+
+**2026-10-25 起，单帧耗时按四个阶段拆开画**（用户要求：碰撞与通信必须分开）：
+
+    sim_ms        模拟（移动 / 剔除 / 补足）
+    collision_ms  朴素 O(子弹×敌机) 碰撞判定
+    ser_ms        序列化
+    net_ms        广播发送
+
+四段**严格相加等于总耗时**（计时点首尾相接），所以图 6-20 能画成 100% 堆叠。
+图 6-17 是「总耗时 + 四段」的多线图 —— 关键不是谁高，而是**斜率不同**：
+如果碰撞线陡、通信线平，就说明瓶颈在游戏逻辑、通信层是可扩展的。
 
 数据来自 `server/metrics.py` 每秒写一行的 CSV。用法：
 
@@ -57,6 +68,11 @@ NUMERIC_FIELDS = (
     "tick_ms_avg",
     "tick_ms_p95",
     "tick_ms_max",
+    "sim_ms",
+    "collision_ms",
+    "ser_ms",
+    "net_ms",
+    "hits",
     "snapshot_bytes",
     "cpu_percent",
     "mem_mb",
@@ -64,6 +80,15 @@ NUMERIC_FIELDS = (
     "bytes_out",
     "packets_in",
     "bytes_in",
+)
+
+# tick 的四个阶段：CSV 列名 → (图例, 颜色, 点型)。
+# 顺序就是 tick 里的执行顺序，堆叠图也按这个顺序往上堆。
+PHASE_SERIES = (
+    ("collision_ms", "碰撞判定", "tab:red", "o"),
+    ("sim_ms", "模拟（移动/剔除/补足）", "tab:orange", "s"),
+    ("ser_ms", "序列化", "tab:blue", "^"),
+    ("net_ms", "广播发送", "tab:green", "v"),
 )
 
 # tick 预算：20 Hz → 50 ms。单帧耗时逼近它就意味着掉帧
@@ -120,7 +145,9 @@ def summarize(rows: list[dict], warmup_s: float = 10.0) -> dict:
     bullets = _mean(values("bullets"))
     bytes_out = _mean(values("bytes_out"))
 
-    return {
+    phases = {field: _mean(values(field)) for field, _, _, _ in PHASE_SERIES}
+
+    summary = {
         "rows": len(kept),
         "players": players,
         "enemies": enemies,
@@ -128,12 +155,18 @@ def summarize(rows: list[dict], warmup_s: float = 10.0) -> dict:
         "entities": players + enemies + bullets,
         "tick_ms_avg": _mean(values("tick_ms_avg")),
         "tick_ms_p95": _mean(values("tick_ms_p95")),
+        "hits": _mean(values("hits")),
         "snapshot_bytes": _mean(values("snapshot_bytes")),
         "cpu_percent": _mean(values("cpu_percent")),
         "mem_mb": _mean(values("mem_mb")),
         # 每行是一个约 1 秒的窗口，所以 bytes_out 就是 B/s；再除以客户端数
         "bw_per_client_bps": bytes_out / players if players else 0.0,
     }
+    summary.update(phases)
+    # 逻辑侧 / 通信侧：用户要求「碰撞与通信分开」，所以这两条聚合线也要能直接画
+    summary["logic_ms"] = phases["sim_ms"] + phases["collision_ms"]
+    summary["comms_ms"] = phases["ser_ms"] + phases["net_ms"]
+    return summary
 
 
 def series_from_groups(groups: dict[str, list[dict]], warmup_s: float = 10.0) -> list[dict]:
@@ -175,20 +208,33 @@ def plot_e9(series: list[dict], out_dir: str | Path) -> list[Path]:
     xs = [s["entities"] for s in series]
     labels = [f"{s['enemies']:.0f}/{s['bullets']:.0f}" for s in series]
 
-    # ---- 图 6-17：实体数 vs 单帧耗时 ----
-    fig, ax = plt.subplots(figsize=(7, 4.5))
+    # ---- 图 6-17：实体数 vs 单帧耗时（四段拆开画）----
+    #
+    # 一条总耗时线回答不了「瓶颈在游戏逻辑还是通信层」。
+    # 四段是**严格相加等于总耗时**的（计时点首尾相接），所以这里既画总线上限，
+    # 也画每段各自的增长斜率 —— 斜率不同才是重点。
+    fig, ax = plt.subplots(figsize=(8, 5))
     ys = [s["tick_ms_avg"] for s in series]
     p95 = [s["tick_ms_p95"] for s in series]
     errors = [max(0.0, hi - lo) for hi, lo in zip(p95, ys)]
 
-    ax.errorbar(xs, ys, yerr=errors, marker="o", capsize=3, label="tick 耗时均值（误差棒 = p95）")
+    ax.errorbar(
+        xs, ys, yerr=errors, marker="D", color="black", linewidth=2,
+        capsize=3, label="tick 总耗时（误差棒 = p95）",
+    )
+    for field, label, color, marker in PHASE_SERIES:
+        ax.plot(
+            xs, [s[field] for s in series], marker=marker, color=color,
+            linewidth=1.4, markersize=5, alpha=0.9, label=label,
+        )
+
     ax.axhline(TICK_BUDGET_MS, color="crimson", linestyle="--", linewidth=1,
                label=f"tick 预算 {TICK_BUDGET_MS:.0f} ms（20 Hz）")
     ax.set_xlabel("同屏实体总数（玩家 + 敌机 + 子弹）")
     ax.set_ylabel("单帧耗时 (ms)")
-    ax.set_title("图 6-17 实体数 vs 单帧耗时")
+    ax.set_title("图 6-17 实体数 vs 单帧耗时（按阶段拆解）")
     ax.grid(alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=8)
     _annotate(ax, xs, ys, [f"敌/弹 {lb}" for lb in labels])
     path = out_dir / "fig6-17-entities-vs-tick.png"
     fig.tight_layout()
@@ -239,11 +285,49 @@ def plot_e9(series: list[dict], out_dir: str | Path) -> list[Path]:
     plt.close(fig)
     written.append(path)
 
+    # ---- 图 6-20（新增）：耗时构成占比 ----
+    #
+    # 四段严格相加等于总耗时，所以这里画 100% 堆叠柱，不存在"其它"。
+    # 这张图回答的是「随实体数增长，钱花在哪变了没有」——
+    # 如果通信占比随实体数**下降**，就说明通信层是可扩展的、瓶颈在逻辑侧。
+    fig, ax = plt.subplots(figsize=(8, 5))
+    bottoms = [0.0] * len(series)
+    for field, label, color, _ in PHASE_SERIES:
+        shares = [
+            (s[field] / s["tick_ms_avg"] * 100) if s["tick_ms_avg"] else 0.0
+            for s in series
+        ]
+        ax.bar(labels, shares, bottom=bottoms, color=color, label=label)
+        bottoms = [b + v for b, v in zip(bottoms, shares)]
+
+    # 在柱子顶上标出「节拍 %」= 单核占用 × 20 Hz 窗口占比，即这 50 ms 里花了多少
+    for index, bottom in enumerate(bottoms):
+        ax.text(
+            index, min(bottom + 1.5, 101.5),
+            f"总计 {series[index]['tick_ms_avg']:.2f} ms\n"
+            f"碰撞命中 {series[index]['hits']:.0f}/s",
+            ha="center", va="bottom", fontsize=7.5,
+        )
+
+    ax.set_ylim(0, 112)
+    ax.set_xlabel("场景（敌机 / 子弹）")
+    ax.set_ylabel("占 tick 总耗时的比例 (%)")
+    ax.set_title("图 6-20 单帧耗时构成占比")
+    ax.grid(alpha=0.3, axis="y")
+    ax.legend(fontsize=8, loc="lower right")
+    path = out_dir / "fig6-20-time-composition.png"
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    written.append(path)
+
     return written
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="出 E9 的三张图（图 6-17/6-18/6-19）")
+    parser = argparse.ArgumentParser(
+        description="出 E9 的四张图（图 6-17 / 6-18 / 6-19 / 6-20）"
+    )
     parser.add_argument("--csv", default="data/server_metrics.csv", help="指标 CSV")
     parser.add_argument("--out", default="docs/figures", help="图片输出目录")
     parser.add_argument(
@@ -267,14 +351,16 @@ def main() -> None:
         print(f"[plot] {args.csv} 里没有可用数据")
         return
 
-    print(f"{'scenario':<28}{'玩家':>5}{'敌机':>6}{'子弹':>6}"
-          f"{'实体':>6}{'tick_ms':>9}{'快照B':>8}{'KB/s':>8}{'CPU%':>7}")
+    print(
+        f"{'scenario':<24}{'实体':>6}{'总ms':>8}{'逻辑ms':>8}{'碰撞ms':>8}"
+        f"{'通信ms':>8}{'快照B':>8}{'KB/s':>8}{'CPU%':>7}{'hits/s':>8}"
+    )
     for s in series:
         print(
-            f"{s['scenario_id']:<28}{s['players']:>5.0f}{s['enemies']:>6.0f}"
-            f"{s['bullets']:>6.0f}{s['entities']:>6.0f}{s['tick_ms_avg']:>9.3f}"
+            f"{s['scenario_id']:<24}{s['entities']:>6.0f}{s['tick_ms_avg']:>8.3f}"
+            f"{s['logic_ms']:>8.3f}{s['collision_ms']:>8.3f}{s['comms_ms']:>8.3f}"
             f"{s['snapshot_bytes']:>8.0f}{s['bw_per_client_bps'] / 1024:>8.1f}"
-            f"{s['cpu_percent']:>7.1f}"
+            f"{s['cpu_percent']:>7.1f}{s['hits']:>8.0f}"
         )
 
     for path in plot_e9(series, args.out):

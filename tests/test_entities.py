@@ -1,9 +1,10 @@
 """占位实体（server/entities.py）的单元测试。
 
-重点验证三件事：
+重点验证四件事：
     1. 角度 → 位移的换算（8 方向整数表，0° = 正上）
     2. 出屏即剔除（D-012）
     3. **数量恒定** —— 这是 E9 自变量成立的前提
+    4. **碰撞只判定不生效** —— 算得对，且一个实体都不动
 """
 
 import unittest
@@ -12,14 +13,24 @@ from protocol.messages import ANGLE_DOWN, ANGLE_LEFT, ANGLE_RIGHT, ANGLE_UP
 from protocol.world import WORLD_HEIGHT, WORLD_WIDTH
 from server.entities import (
     BULLET_SPEED_PER_TICK,
+    COLLISION_RADIUS,
     ENEMY_SPEED_PER_TICK,
     Bullet,
     Enemy,
     World,
     angle_to_delta,
+    detect_collisions,
 )
 
 PLAYERS = [(1, 360)]
+
+
+def make_bullet(x: int, y: int) -> Bullet:
+    return Bullet(owner_id=0, x=x, y=y, type=0x11, angle=ANGLE_DOWN)
+
+
+def make_enemy(enemy_id: int, x: int, y: int) -> Enemy:
+    return Enemy(enemy_id=enemy_id, x=x, y=y)
 
 
 class AngleTest(unittest.TestCase):
@@ -210,6 +221,96 @@ class SnapshotExportTest(unittest.TestCase):
         self.assertEqual(enemies[0].enemy_id, world.enemies[0].enemy_id)
         self.assertEqual(bullets[0].owner_id, world.bullets[0].owner_id)
         self.assertEqual(world.counts(), (3, 7))
+
+
+class CollisionTest(unittest.TestCase):
+    """朴素 O(子弹×敌机) 判定：算得对，而且**什么都不改**。"""
+
+    def test_empty_inputs(self):
+        self.assertEqual(detect_collisions([], []), 0)
+        self.assertEqual(detect_collisions([make_bullet(0, 0)], []), 0)
+        self.assertEqual(detect_collisions([], [make_enemy(1, 0, 0)]), 0)
+
+    def test_far_apart_is_not_a_hit(self):
+        bullets = [make_bullet(0, 0)]
+        enemies = [make_enemy(1, 100, 100)]
+        self.assertEqual(detect_collisions(bullets, enemies), 0)
+
+    def test_overlapping_is_a_hit(self):
+        bullets = [make_bullet(100, 100)]
+        enemies = [make_enemy(1, 103, 102)]
+        self.assertEqual(detect_collisions(bullets, enemies), 1)
+
+    def test_radius_boundary_is_inclusive(self):
+        bullets = [make_bullet(100, 100)]
+        on_edge = [make_enemy(1, 100 + COLLISION_RADIUS, 100)]
+        just_outside = [make_enemy(1, 100 + COLLISION_RADIUS + 1, 100)]
+
+        self.assertEqual(detect_collisions(bullets, on_edge), 1)
+        self.assertEqual(detect_collisions(bullets, just_outside), 0)
+
+    def test_x_must_overlap_too(self):
+        # x 重叠但 y 差很远：不能只凭一个轴就判定命中
+        bullets = [make_bullet(100, 100)]
+        enemies = [make_enemy(1, 100, 500)]
+        self.assertEqual(detect_collisions(bullets, enemies), 0)
+
+    def test_counts_every_overlapping_pair(self):
+        # 2 子弹 × 3 敌机 全部重叠 → 6 对（每对都算一次，不去重）
+        bullets = [make_bullet(100, 100) for _ in range(2)]
+        enemies = [make_enemy(i, 100, 100) for i in range(3)]
+        self.assertEqual(detect_collisions(bullets, enemies), 6)
+
+    def test_is_pure_and_mutates_nothing(self):
+        # 「只判定不生效」的硬约束：实体数量、坐标、血量一个都不能变。
+        # 这是 E9 自变量恒定的根据 —— 碰撞绝不允许偷偷删实体。
+        bullets = [make_bullet(100, 100), make_bullet(300, 300)]
+        enemies = [make_enemy(1, 100, 100), make_enemy(2, 500, 500)]
+        before = (
+            [(b.x, b.y, b.owner_id) for b in bullets],
+            [(e.x, e.y, e.hp, e.enemy_id) for e in enemies],
+        )
+
+        detect_collisions(bullets, enemies)
+
+        self.assertEqual(len(bullets), 2)
+        self.assertEqual(len(enemies), 2)
+        self.assertEqual(
+            (
+                [(b.x, b.y, b.owner_id) for b in bullets],
+                [(e.x, e.y, e.hp, e.enemy_id) for e in enemies],
+            ),
+            before,
+        )
+
+    def test_repeated_calls_agree(self):
+        # 纯函数：同一个场地算两遍结果一样
+        world = World(enemy_target=20, bullet_target=60, seed=5)
+        for _ in range(10):
+            world.step(PLAYERS)
+
+        first = detect_collisions(world.bullets, world.enemies)
+        second = detect_collisions(world.bullets, world.enemies)
+        self.assertEqual(first, second)
+
+    def test_hits_is_far_below_the_pair_count(self):
+        # 真实场地里绝大多数配对都不重叠。这条同时说明：
+        # hits 是「循环真的在算」的证据，但它的量级不该等于总配对数
+        world = World(enemy_target=30, bullet_target=200, seed=7)
+        for _ in range(20):
+            world.step(PLAYERS)
+
+        pairs = len(world.bullets) * len(world.enemies)
+        hits = detect_collisions(world.bullets, world.enemies)
+
+        self.assertEqual(pairs, 200 * 30)
+        self.assertLess(hits, pairs)
+
+    def test_pair_count_is_quadratic(self):
+        # 这就是 01 §7.1 说的「朴素 O(子弹×敌机)」：100×800 = 每 tick 8 万次配对
+        world = World(enemy_target=100, bullet_target=800, seed=1)
+        world.step(PLAYERS)
+        self.assertEqual(len(world.bullets) * len(world.enemies), 80_000)
 
 
 if __name__ == "__main__":

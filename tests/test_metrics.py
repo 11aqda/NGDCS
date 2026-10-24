@@ -15,6 +15,7 @@ from server.metrics import (
     cpu_percent_from_deltas,
     write_scenario,
 )
+from server.stats import PHASES
 
 
 def read_rows(path: Path) -> list[dict]:
@@ -29,6 +30,11 @@ def sample_stats(**overrides) -> dict:
         "p50_ms": 0.4,
         "p95_ms": 0.8,
         "max_ms": 1.2,
+        "sim_ms": 0.12,
+        "collision_ms": 0.2,
+        "ser_ms": 0.1,
+        "net_ms": 0.08,
+        "hits": 3,
         "snapshot_bytes": 1939,
         "packets_in": 80,
         "bytes_in": 1040,
@@ -87,6 +93,29 @@ class MetricsRecorderTest(unittest.TestCase):
         self.assertEqual(rows[0]["tick_ms_p95"], "0.8")
         self.assertEqual(rows[0]["snapshot_bytes"], "1939")
         self.assertEqual(rows[0]["bytes_out"], "7804")
+
+    def test_phase_columns_are_written(self):
+        # 用户要求：碰撞与通信必须分开测 —— 分开的第一层就是「CSV 里是分开的列」
+        recorder = self.make("E9-e100-b800")
+        recorder.write(client_count=4, enemies=100, bullets=800, stats=sample_stats())
+        recorder.close()
+
+        row = read_rows(self.path)[0]
+        self.assertEqual(row["sim_ms"], "0.12")
+        self.assertEqual(row["collision_ms"], "0.2")
+        self.assertEqual(row["ser_ms"], "0.1")
+        self.assertEqual(row["net_ms"], "0.08")
+        self.assertEqual(row["hits"], "3")
+
+    def test_phase_columns_sum_to_tick_avg(self):
+        # 落盘之后这个恒等式还得成立，否则图 6-20 的堆叠会缺一块
+        recorder = self.make()
+        recorder.write(client_count=4, enemies=30, bullets=200, stats=sample_stats())
+        recorder.close()
+
+        row = read_rows(self.path)[0]
+        phases = sum(float(row[f"{phase}_ms"]) for phase in PHASES)
+        self.assertAlmostEqual(phases, float(row["tick_ms_avg"]), places=3)
 
     def test_header_matches_declared_fields(self):
         recorder = self.make()

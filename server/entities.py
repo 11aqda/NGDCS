@@ -40,6 +40,10 @@ SPAWN_MARGIN = 40
 # 玩家子弹从屏幕下方往上打
 PLAYER_BULLET_SPAWN_Y = WORLD_HEIGHT - 60
 
+# 碰撞判定半径（像素）：子弹约 4 px、敌机约 14 px，取半个身位做粗略 AABB。
+# 占位阶段不追求判定精度，只追求**算法复杂度与真实版本一致**（01 §7.1 的朴素 O(子弹×敌机)）
+COLLISION_RADIUS = 8
+
 # 八方向整数表（0° = 正上，顺时针，02 §4.5）
 _OCTANTS = (
     (0, -1),  # 0    正上
@@ -192,3 +196,38 @@ class World:
 
     def counts(self) -> tuple[int, int]:
         return len(self.enemies), len(self.bullets)
+
+
+def detect_collisions(bullets: list[Bullet], enemies: list[Enemy]) -> int:
+    """朴素 O(子弹 × 敌机) 碰撞判定，**只数命中对数，不产生任何效果**，返回命中数。
+
+    为什么用朴素双重循环：`01 §7.1` 那份基准
+    （100 敌机 + 800 子弹 = 4.37 ms/tick、87.3% 单核）算的就是
+    **每 tick 8 万次**的朴素判定，我们要复现的是这个**算法复杂度**，
+    而不是它的常数因子（那个原型是一次性的，代码没留下来）。
+    空间划分 / 网格加速属于第 11 步之后的优化，届时正好可以做对比实验。
+
+    为什么**只判定不生效**：
+      1. E9 的自变量是「同屏实体数」。只算不改，数量就**由构造保证**恒定，
+         不必依赖「删掉再补足」来维持 —— 自变量最干净
+      2. 伤害结算 / 掉落 / 计分是第 11 步的游戏内容，现在做等于白做
+
+    为什么还要返回 hits：它是「这个循环真的在算」的证据。
+    没有它，一个写错方向、实际空转的循环同样会报出很漂亮的耗时曲线。
+
+    实现上的两点讲究（都会明显影响常数因子，所以写清楚）：
+      - 先把 `bullet.x / bullet.y` 取到局部变量，避免内层循环反复做属性查找
+      - **先判 x 再判 y**：绝大多数配对在 x 上就不重叠，可以短路掉 y 的两次比较
+    """
+    radius = COLLISION_RADIUS
+    hits = 0
+    for bullet in bullets:
+        bx = bullet.x
+        by = bullet.y
+        for enemy in enemies:
+            dx = bx - enemy.x
+            if -radius <= dx <= radius:
+                dy = by - enemy.y
+                if -radius <= dy <= radius:
+                    hits += 1
+    return hits

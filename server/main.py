@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -47,7 +49,7 @@ from protocol.messages import (
     unpack_keys,
 )
 from protocol.snapshot import PlayerSnapshot, pack_snapshot
-from server.entities import World
+from server.entities import World, detect_collisions
 from server.metrics import MetricsRecorder, write_scenario
 from server.movement import apply_input
 from server.stats import TickStats
@@ -224,11 +226,15 @@ class GameServer:
         self.stats.record_snapshot(len(payload))
         return payload
 
-    async def broadcast_snapshot(self) -> None:
+    async def broadcast(self, payload: bytes) -> None:
+        """把**已经序列化好的**载荷发给所有客户端。
+
+        和 `build_snapshot()` 拆开，是为了让「序列化」和「发送」各自计时 ——
+        合成一个方法就没法量出通信耗时的两部分了。
+        """
         if not self.clients:
             return
 
-        payload = self.build_snapshot()
         size = HEADER.size + len(payload)
         for client in list(self.clients.values()):
             try:
@@ -254,11 +260,18 @@ class GameServer:
         if not self.print_stats_enabled:
             return
         enemies, bullets = self.world.counts()
+        logic = stats["sim_ms"] + stats["collision_ms"]
+        comms = stats["ser_ms"] + stats["net_ms"]
         print(
-            f"[server] tick {TICK_HZ} Hz | avg {stats['avg_ms']:.3f} ms | "
-            f"p50 {stats['p50_ms']:.3f} ms | p95 {stats['p95_ms']:.3f} ms | "
-            f"max {stats['max_ms']:.3f} ms | players {len(self.clients)} | "
-            f"e/b {enemies}/{bullets} | snap {stats['snapshot_bytes']} B | "
+            f"[server] tick {TICK_HZ} Hz | total {stats['avg_ms']:.3f} ms "
+            f"(p50 {stats['p50_ms']:.3f} p95 {stats['p95_ms']:.3f} "
+            f"max {stats['max_ms']:.3f}) | "
+            f"logic {logic:.3f} (sim {stats['sim_ms']:.3f} + "
+            f"col {stats['collision_ms']:.3f}) | "
+            f"comms {comms:.3f} (ser {stats['ser_ms']:.3f} + "
+            f"net {stats['net_ms']:.3f}) | "
+            f"players {len(self.clients)} | e/b {enemies}/{bullets} | "
+            f"snap {stats['snapshot_bytes']} B | hits {stats['hits']} | "
             f"in {stats['packets_in']}/s"
         )
 
@@ -285,16 +298,68 @@ class GameServer:
 
             started = time.perf_counter()
             self.tick += 1
+
+            # ① 模拟：玩家按输入移动 + 实体移动 / 出屏剔除 / 补足数量
             self.update_players(started)
             self.world.step([(c.player_id, c.x) for c in self.clients.values()])
-            await self.broadcast_snapshot()
-            self.stats.record_tick(time.perf_counter() - started)
+            sim_done = time.perf_counter()
+
+            # ② 碰撞判定：朴素 O(子弹×敌机)，**只判定不生效**（见 entities.py）
+            hits = detect_collisions(self.world.bullets, self.world.enemies)
+            collision_done = time.perf_counter()
+
+            # ③ 序列化：把几百个实体逐个 struct.pack（没人连就不做）
+            payload = self.build_snapshot() if self.clients else None
+            ser_done = time.perf_counter()
+
+            # ④ 广播：逐客户端 write + drain
+            if payload is not None:
+                await self.broadcast(payload)
+            net_done = time.perf_counter()
+
+            self.stats.record_tick(net_done - started)
+            self.stats.record_phase("sim", sim_done - started)
+            self.stats.record_phase("collision", collision_done - sim_done)
+            self.stats.record_phase("ser", ser_done - collision_done)
+            self.stats.record_phase("net", net_done - ser_done)
+            self.stats.record_hits(hits)
 
             if self.tick % STATS_EVERY_TICKS == 0:
                 await self.reap_timeouts()
                 window = self.stats.flush()
                 self.report_stats(window)
                 self.write_metrics(window)
+
+
+def report_tick_crash(task: asyncio.Task, file=None) -> BaseException | None:
+    """tick_loop 的 done 回调：死了必须**大声报**，返回异常（没死返回 None）。
+
+    为什么单独写这个：2026-10-25 真的踩到了。`tick_loop` 里一个没导入的名字
+    让它在第一个 tick 就抛 `NameError`，然后**整个协程静静死掉** ——
+    服务端照常监听、照常打印 "player 1 joined"，客户端却再也收不到一帧快照。
+
+    症状极具迷惑性：机器人报告 `clients_connected: 4` 但 `snapshots: 0`、
+    `errors: 0`（连接是好的，只是没人广播）。要是没发现，
+    一次 3 分钟的实验会老老实实跑完，然后留下一整份空数据。
+
+    asyncio 只在**任务对象被回收**时才打印未取回的异常，而 `main()` 一直持有引用，
+    所以进程活着的时候什么都不显示 —— 必须自己接个 done 回调。
+    """
+    if task.cancelled():
+        return None
+
+    exc = task.exception()
+    if exc is None:
+        return None
+
+    stream = file if file is not None else sys.stdout
+    print(
+        f"[server] !! tick loop 已崩溃，不再广播快照："
+        f"{type(exc).__name__}: {exc}",
+        file=stream,
+    )
+    traceback.print_exception(type(exc), exc, exc.__traceback__, file=stream)
+    return exc
 
 
 def parse_args() -> argparse.Namespace:
@@ -362,6 +427,8 @@ async def main(args: argparse.Namespace) -> None:
     )
 
     tick_task = asyncio.create_task(game.tick_loop())
+    # 静默死掉的 tick loop 会让整场实验录到空数据，所以必须挂个回调盯着
+    tick_task.add_done_callback(report_tick_crash)
     try:
         async with server:
             await server.serve_forever()
@@ -371,6 +438,8 @@ async def main(args: argparse.Namespace) -> None:
             await tick_task
         except asyncio.CancelledError:
             pass
+        except Exception:
+            pass  # 已经在 report_tick_crash 里报过一次，不重复刷屏
         if metrics is not None:
             metrics.close()
 
