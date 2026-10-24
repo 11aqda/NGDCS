@@ -178,7 +178,17 @@ class MetricsRecorderTest(unittest.TestCase):
 
         row = read_rows(self.path)[0]
         self.assertEqual(row["cpu_percent"], "")
+        self.assertEqual(row["cpu_seconds"], "")
         self.assertEqual(row["mem_mb"], "")
+
+    def test_cumulative_cpu_column_exists(self):
+        # 低负载下逐秒 cpu_percent 会被调度计时粒度量化，
+        # 所以 CSV 必须同时存累计值，供出图时算整轮 CPU%
+        recorder = self.make()
+        recorder.write(client_count=0, enemies=0, bullets=0, stats=sample_stats())
+        recorder.close()
+
+        self.assertIn("cpu_seconds", read_rows(self.path)[0])
 
 
 class ScenarioFileTest(unittest.TestCase):

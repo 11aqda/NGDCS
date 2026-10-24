@@ -14,9 +14,14 @@ from tools.plot import (
     HAVE_MPL,
     group_by_scenario,
     load_rows,
+    load_series,
+    merge_runs,
     plot_e9,
-    series_from_groups,
+    run_agreement,
+    run_cpu_percent,
+    split_scenario_id,
     summarize,
+    summarize_runs,
 )
 
 
@@ -56,6 +61,8 @@ def make_row(
         "hits": 0,
         "snapshot_bytes": snapshot_bytes,
         "cpu_percent": cpu_percent,
+        # 累计 CPU 秒数：与 cpu_percent 自洽（整轮首尾差算出来正好等于 cpu_percent）
+        "cpu_seconds": None if cpu_percent is None else t_mono * cpu_percent / 100.0,
         "mem_mb": 60.0,
         "packets_out": 80,
         "bytes_out": bytes_out,
@@ -183,12 +190,171 @@ class SeriesTest(unittest.TestCase):
 
     def test_series_sorted_by_entity_count(self):
         # 画图的横轴顺序：实体数从小到大
-        groups = {
-            "big": [{**make_row("big", 0.0, enemies=100, bullets=800), "t_mono": 0.0}],
-            "small": [{**make_row("small", 0.0, enemies=10, bullets=50), "t_mono": 0.0}],
-        }
-        series = series_from_groups(groups, warmup_s=0.0)
-        self.assertEqual([s["scenario_id"] for s in series], ["small", "big"])
+        rows = [
+            {**make_row("E9-e100-b800", 0.0, enemies=100, bullets=800), "t_mono": 0.0},
+            {**make_row("E9-e10-b50", 0.0, enemies=10, bullets=50), "t_mono": 0.0},
+        ]
+        series, _ = load_series(rows, warmup_s=0.0)
+        self.assertEqual([s["scenario_id"] for s in series], ["E9-e10-b50", "E9-e100-b800"])
+
+
+class MultiRunTest(unittest.TestCase):
+    """同一个档位跑多轮（`-rN` 后缀）。"""
+
+    def test_split_without_suffix_is_run_one(self):
+        self.assertEqual(split_scenario_id("E9-e30-b200"), ("E9-e30-b200", 1))
+
+    def test_split_with_suffix(self):
+        self.assertEqual(split_scenario_id("E9-e30-b200-r2"), ("E9-e30-b200", 2))
+        self.assertEqual(split_scenario_id("E9-e250-b2000-r12"), ("E9-e250-b2000", 12))
+
+    def test_only_trailing_suffix_counts(self):
+        # 中间出现 -r 不算（避免把别人的命名习惯误判成轮次）
+        self.assertEqual(split_scenario_id("E9-r5-e30"), ("E9-r5-e30", 1))
+
+    def test_two_runs_stay_separate_before_merge(self):
+        rows = [
+            {**make_row("L-r1", float(t)), "t_mono": float(t)} for t in range(20)
+        ] + [
+            {**make_row("L-r2", float(t)), "t_mono": float(t)} for t in range(20)
+        ]
+        per_level = summarize_runs(group_by_scenario(rows), warmup_s=5.0)
+
+        self.assertEqual(list(per_level), ["L"])
+        self.assertEqual([r["run"] for r in per_level["L"]], [1, 2])
+        # 每一轮各自丢热身：20 行 - 前 5 秒 = 15 行
+        self.assertEqual([r["rows"] for r in per_level["L"]], [15, 15])
+
+    def test_each_run_gets_its_own_warmup(self):
+        """关键点：t_mono 每轮都从 0 开始，两轮必须各自丢热身。
+
+        第 1 轮全程 1.0 ms；第 2 轮前 10 秒是 9.0 ms（不稳定）后面是 1.0 ms。
+        如果两轮混在一起丢热身，第 2 轮那段 9.0 会被算进去 → 均值被拉高。
+        """
+        rows = [
+            {**make_row("L-r1", float(t), tick_ms=1.0), "t_mono": float(t)}
+            for t in range(20)
+        ] + [
+            {
+                **make_row("L-r2", float(t), tick_ms=9.0 if t < 10 else 1.0),
+                "t_mono": float(t),
+            }
+            for t in range(20)
+        ]
+        per_level = summarize_runs(group_by_scenario(rows), warmup_s=10.0)
+
+        first, second = per_level["L"]
+        self.assertAlmostEqual(first["tick_ms_avg"], 1.0, places=3)
+        self.assertAlmostEqual(second["tick_ms_avg"], 1.0, places=3)
+
+    def test_merge_averages_numeric_fields(self):
+        merged = merge_runs(
+            [
+                {"level": "L", "run": 1, "entities": 234.0, "tick_ms_avg": 1.0, "hits": 10.0},
+                {"level": "L", "run": 2, "entities": 234.0, "tick_ms_avg": 3.0, "hits": 20.0},
+            ]
+        )
+        self.assertAlmostEqual(merged["tick_ms_avg"], 2.0)
+        self.assertAlmostEqual(merged["hits"], 15.0)
+        self.assertEqual(merged["runs"], 2)
+        self.assertEqual(merged["scenario_id"], "L")  # 图上不带 -rN
+
+    def test_merge_empty(self):
+        self.assertEqual(merge_runs([]), {})
+
+    def test_one_point_per_level(self):
+        rows = []
+        for level, enemies, bullets in (("L1", 10, 50), ("L2", 30, 200)):
+            for run in (1, 2):
+                for t in range(10):
+                    rows.append(
+                        {
+                            **make_row(
+                                f"{level}-r{run}",
+                                float(t),
+                                enemies=enemies,
+                                bullets=bullets,
+                            ),
+                            "t_mono": float(t),
+                        }
+                    )
+        series, per_level = load_series(rows, warmup_s=0.0)
+
+        self.assertEqual(len(series), 2)  # 两个档位 = 两个点，不是四个
+        self.assertEqual([s["scenario_id"] for s in series], ["L1", "L2"])
+        self.assertTrue(all(s["runs"] == 2 for s in series))
+        self.assertEqual(len(per_level["L1"]), 2)  # 但每轮的汇总都留着
+
+    def test_agreement_zero_for_identical_runs(self):
+        runs = [{"tick_ms_avg": 2.0}, {"tick_ms_avg": 2.0}]
+        self.assertAlmostEqual(run_agreement(runs), 0.0)
+
+    def test_agreement_reports_max_relative_gap(self):
+        # 均值 2.0，两轮分别是 1.8 / 2.2 → 最大偏差 0.2/2.0 = 10%
+        runs = [{"tick_ms_avg": 1.8}, {"tick_ms_avg": 2.2}]
+        self.assertAlmostEqual(run_agreement(runs), 10.0)
+
+    def test_agreement_needs_two_runs(self):
+        self.assertEqual(run_agreement([{"tick_ms_avg": 2.0}]), 0.0)
+        self.assertEqual(run_agreement([]), 0.0)
+
+    def test_agreement_handles_zero_mean(self):
+        self.assertEqual(run_agreement([{"tick_ms_avg": 0.0}, {"tick_ms_avg": 0.0}]), 0.0)
+
+
+class RunCpuTest(unittest.TestCase):
+    """整轮 CPU% 用「累计 CPU 秒数首尾差 ÷ 墙钟首尾差」算。
+
+    起因（2026-10-25 实测）：低负载下逐秒 `cpu_percent` 被调度计时粒度量化，
+    同一档位两轮的逐秒均值能差到 66%（2.6% vs 0.5%）。
+    """
+
+    def test_exact_from_cumulative(self):
+        rows = [
+            {**make_row("L", 0.0, cpu_percent=5.0), "t_mono": 0.0},
+            {**make_row("L", 1.0, cpu_percent=5.0), "t_mono": 1.0},
+            {**make_row("L", 2.0, cpu_percent=5.0), "t_mono": 2.0},
+        ]
+        self.assertAlmostEqual(run_cpu_percent(rows), 5.0, places=3)
+
+    def test_ignores_the_noisy_per_row_column(self):
+        """逐秒列被量化得很乱，累计列是干净的 —— 应当以累计列为准。"""
+        rows = [
+            {"t_mono": 0.0, "cpu_seconds": 0.000, "cpu_percent": 99.0},
+            {"t_mono": 1.0, "cpu_seconds": 0.010, "cpu_percent": 0.0},
+            {"t_mono": 2.0, "cpu_seconds": 0.021, "cpu_percent": 0.0},
+            {"t_mono": 3.0, "cpu_seconds": 0.031, "cpu_percent": 1.56},
+        ]
+        # 整轮：0.031 s / 3 s = 1.03%；而逐秒均值是 (99+0+0+1.56)/4 = 25.1%
+        self.assertAlmostEqual(run_cpu_percent(rows), 1.033, places=2)
+        self.assertGreater(
+            sum(r["cpu_percent"] for r in rows) / len(rows),
+            20.0,
+            "构造的逐秒数据本就该很离谱，否则这条测试没有意义",
+        )
+
+    def test_missing_cumulative_column_falls_back(self):
+        # 旧 CSV（没有 cpu_seconds 列）→ 返回 0，由 summarize 退回逐秒均值
+        rows = [{"t_mono": 0.0, "cpu_percent": 7.0}, {"t_mono": 1.0, "cpu_percent": 7.0}]
+        self.assertEqual(run_cpu_percent(rows), 0.0)
+
+        summary = summarize(
+            [{**make_row("L", float(t)), "t_mono": float(t), "cpu_seconds": None}
+             for t in range(3)],
+            warmup_s=0.0,
+        )
+        self.assertAlmostEqual(summary["cpu_percent"], 5.0, places=3)
+
+    def test_needs_at_least_two_points(self):
+        self.assertEqual(run_cpu_percent([{"t_mono": 0.0, "cpu_seconds": 0.0}]), 0.0)
+        self.assertEqual(run_cpu_percent([]), 0.0)
+
+    def test_zero_time_span(self):
+        rows = [
+            {"t_mono": 1.0, "cpu_seconds": 0.0},
+            {"t_mono": 1.0, "cpu_seconds": 0.5},
+        ]
+        self.assertEqual(run_cpu_percent(rows), 0.0)
 
 
 @unittest.skipUnless(HAVE_MPL, "需要 matplotlib")
@@ -224,7 +390,7 @@ class PlotSmokeTest(unittest.TestCase):
                 )
         write_csv(self.csv_path, rows)
 
-        series = series_from_groups(group_by_scenario(load_rows(self.csv_path)), 10.0)
+        series, _ = load_series(load_rows(self.csv_path), 10.0)
         written = plot_e9(series, self.out_dir)
 
         self.assertEqual(len(written), 4)

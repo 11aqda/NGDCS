@@ -563,6 +563,19 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main 9527 --timeout 
 > （100/800 时单核只占 13.2%）。已同步到 `03-实验清单.md §5`。
 > D-011 明确说过实验**有意突破** 30/300 的设计上限；加两档后总时长约 55~60 分钟。
 
+**8b 的前置工具已就绪（2026-10-25 晚）**：
+
+- **多轮实验约定**：场景名加 `-rN` 后缀（`E9-e30-b200-r1` / `-r2`）。
+  `tools/plot.py` 会**每一轮单独丢热身**再按档位合并 ——
+  因为服务端每重启一次 `t_mono` 就从 0 重来，两轮混在一起会把第二轮的不稳定期算进均值（坑 #16）
+- **多轮一致性检查**：出图时自动打印各档位的 tick / CPU 相对偏差，
+  超过 10% 会提示"要查明原因"（`03 §7` 要求跑 ≥2 次取一致结果）
+- **CPU 测量已修正**：低负载下逐秒 CPU 被调度计时粒度量化，改用累计值算整轮
+  （偏差 66% → **7.3%**，坑 #15）
+- **无效行自动过滤**：`client_count == 0` 的时段（服务端空转）不参与统计
+
+> 冒烟验证（100/800 跑两轮）：tick 偏差 **0.5%**、CPU 偏差 **7.3%**、两轮都是 errors 0 —— 管线可用。
+
 **运行**：
 
 ```powershell
@@ -594,6 +607,8 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m tools.plot --csv data/serve
 | 12 | 出图时中文标题全变成**方块** | matplotlib 默认字体不含中文 | `plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", ...]`，并关掉 `axes.unicode_minus`（负号也会变方块） |
 | 13 | 一次性实验脚本跑完，**仓库根目录多出一个 `tmpXXXXXXXX/`** | `tempfile.mkdtemp()` 在 `TMPDIR` / `TEMP` / `TMP` 都取不到时，会退而使用**当前工作目录** | 写实验脚本时 `tempfile.mkdtemp(dir=...)` 显式指定目录，别依赖环境变量（和坑 #11 是同一类"临时目录落到仓库里"的问题） |
 | 14 | 服务端**照常监听、照常打印 "player joined"，但客户端 `snapshots: 0`、`errors: 0`** | `tick_loop` 里漏了一行 import（`detect_collisions`），第一个 tick 就抛 `NameError` → **协程静静死掉**。asyncio 只在任务对象被回收时才打印未取回的异常，而 `main()` 一直持有 `tick_task` 引用，所以进程活着的时候什么都不显示 | ① `tick_task.add_done_callback(report_tick_crash)`，崩了立刻带 traceback 报出来；② `tests/test_tick_guard.py` 真跑一遍 tick_loop，名字缺一个就在第一个 tick 失败。**长时间无人值守的实验尤其要防这个** —— 否则会跑完并留下一整份空数据 |
+| 15 | **同一档位跑两轮，CPU% 差 66%**（2.6% vs 0.5%），而 tick 只差 1.5% | 进程 CPU 时间按**调度时钟**更新（Windows 约 15.6 ms 一跳）。服务端每秒只花 ~20 ms CPU 时，单行会读成 0% 或 1.56%，逐秒平均不可信 | CSV 增存**累计 CPU 秒数** `cpu_seconds`；出图改用「**首尾累计差 ÷ 首尾墙钟差**」算整轮 CPU% → 偏差降到 **7.3%**。低于 5% 单核时出图会提示"以 tick 为准" |
+| 16 | 多轮实验的热身数据混进均值 | 服务端**每重启一次 `t_mono` 就从 0 重新开始**，两轮在时间轴上完全重叠；混在一起丢热身会把第二轮的不稳定期当成有效数据 | 场景名加 `-rN` 后缀；`tools/plot.py` **每一轮单独丢热身**后再按档位合并，并打印多轮一致性（03 §7 要求跑 ≥2 次取一致结果） |
 
 ---
 

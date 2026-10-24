@@ -227,6 +227,61 @@ def report_tick_crash(task, file=None):
 没有它，你会得到一份**跑完了、但全是 0 的数据**，
 然后花半天怀疑是 CSV 写错了、是机器人有问题、是网络不通。
 
+### 3.6 🔴 跑多轮实验：为什么不能把两轮混在一起算
+
+`03-实验清单 §7` 要求「每个实验**至少跑 2 次**，取一致的结果」。
+所以场景名约定加 `-rN` 后缀：
+
+```
+E9-e30-b200-r1     ← 第 1 轮
+E9-e30-b200-r2     ← 第 2 轮
+```
+
+**为什么必须分开丢热身**：`t_mono` 是「**自本进程启动以来的秒数**」，
+而每一轮都要**重启服务端**（换实体数、重新开始计时）。所以两轮的 `t_mono`
+**都从 0 开始**，在时间轴上完全重叠。
+
+如果按场景名后缀一剥、把两轮的 80 行混在一起丢前 10 秒，
+丢掉的只是"第 1 轮的前 10 秒"，**第 2 轮的前 10 秒会被当成有效数据**——
+而那正是"进程刚起来、客户端还没连满、缓存没热"的不稳定期，
+会把均值拉偏，而且**从数字上完全看不出来**。
+
+所以：**每一轮单独丢热身 → 再按档位取平均**。工具里就是
+`summarize_runs()`（每轮一份汇总）→ `merge_runs()`（合成一个点）。
+
+### 3.7 🔴 低负载下 CPU 读数会失真（实测踩到的）
+
+跑两轮同一个档位（30 敌机 + 200 子弹），结果：
+
+| 指标 | 第 1 轮 | 第 2 轮 | 偏差 |
+|---|---|---|---|
+| `tick_ms` | 1.017 | 0.987 | **1.5 %** ✅ |
+| `cpu_percent` | 2.6 % | 0.5 % | **66.6 %** ❌ |
+
+**同一个档位、同一台机器、同样的种子，CPU 怎么会差 5 倍？**
+
+因为**进程 CPU 时间是按调度时钟更新的**（Windows 上大约 15.6 ms 一跳）。
+30 敌机 + 200 子弹时，服务端每秒只花约 **20 ms** CPU ——
+和 15.6 ms 的粒度是同一个量级，所以单行要么读成 **0 %**，要么读成 **1.56 %**。
+逐秒平均下来就是个噪声数。
+
+**注意 `tick_ms` 不受影响**：它是进程内 `perf_counter()` 直接量出来的，精度远高于此。
+所以**低负载时以 `tick_ms` 为准**。
+
+**解法**：不要对逐秒读数求平均，而是用**累计量**：
+
+```
+整轮 CPU% = (末尾累计 CPU 秒数 - 开头累计 CPU 秒数) ÷ (末尾 t_mono - 开头 t_mono) × 100
+```
+
+这样只有**两个端点**各带一次量化误差，除以几分钟的整轮时长后基本消失。
+所以 CSV 里额外存了一列 `cpu_seconds`（进程累计 CPU 时间）。
+
+**修正后**：100/800 跑两轮，CPU 偏差从 66 % 降到 **7.3 %**。
+
+> **这条值得写进论文的"实验方法"一节**：它说明为什么不能直接平均逐秒读数，
+> 以及怎么用累计量消除量化误差。答辩被问"你的 CPU 数据准吗"，这就是答案。
+
 ---
 
 ## 4. 防御性代码（单独看）
@@ -241,6 +296,9 @@ def report_tick_crash(task, file=None):
 | 四段计时点首尾相接 | 堆叠图出现"其它"这一类含糊项，论文里说不清 |
 | `report_tick_crash` | 静默死掉的 tick loop —— 跑完一整场实验却零数据 |
 | `tests/test_tick_guard.py` 真跑 tick_loop | 上面那个 `NameError` 本该在**第一个 tick** 就被抓住 |
+| 场景名 `-rN` + **每轮单独丢热身** | 第二轮的不稳定期被当成有效数据，均值偏低且看不出来 |
+| CPU 用**累计量首尾差**而非逐秒均值 | 低负载下调度计时粒度把读数量化成 0% / 1.56%，两轮能差 66% |
+| 过滤 `client_count == 0` 的行 | 服务端空转时段 tick 快得离谱、快照 0 B，混进来会把整档耗时拉低 |
 
 ---
 
@@ -380,11 +438,24 @@ def report_tick_crash(task, file=None):
 
 ```powershell
 # 服务端：屏幕上会直接打出分段耗时
-E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main --enemies 100 --bullets 800 --scenario E9-e100-b800-01
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m server.main --enemies 100 --bullets 800 --scenario E9-e100-b800-r1
 
-# 机器人 + 出图
+# 机器人（每轮 3 分钟）+ 出图
 E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m bot.main --clients 4 --duration 180
-E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m tools.plot --csv data/server_metrics.csv --out docs/figures
+E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m tools.plot --csv data/server_metrics.csv --out docs/figures --scenario E9-
+```
+
+`tools/plot.py` 会打印**逐轮 + 合并**两张表，以及多轮一致性：
+
+```text
+档位                      轮    实体     总ms    碰撞ms    通信ms     快照B    KB/s   CPU%  hits/s
+E9-verify-e100-b800-r1  1   904   5.701   4.467   0.875    7357   146.6   12.0     566
+E9-verify-e100-b800-r2  2   904   5.754   4.517   0.874    7357   146.4   10.3     533
+  ↑ E9-verify-e100-b800 多轮均值  2   904   5.728   4.492   0.875    7357   146.5   11.2     549
+
+=== 多轮一致性（03 §7）===
+  E9-verify-e100-b800    轮数 2  tick 偏差   0.5%  CPU 偏差   7.3%
+  → 全部在容差内，可作正式数据
 ```
 
 服务端每秒一行，长这样：
