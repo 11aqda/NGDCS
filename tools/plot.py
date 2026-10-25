@@ -326,14 +326,33 @@ def load_series(
 
 
 def _annotate(ax, xs, ys, labels) -> None:
-    for x, y, label in zip(xs, ys, labels):
+    """给数据点加「敌/弹」标注。
+
+    两条规则，都是为了在**低档位挤在一起**时不糊成一团：
+
+    1. **上下交替** —— 10/50、20/100、30/200 的实体数是 64 / 124 / 234，
+       而横轴要到 2254，全标在上方必然重叠
+    2. **间距不足就跳过** —— 相邻标注横向间隔小于轴长的 6% 时干脆不标，
+       少一个标注比两个糊在一起好读（被跳过的档位在控制台表格与实验记录里都有）
+    """
+    span = (max(xs) - min(xs)) if len(xs) > 1 else 0
+    min_gap = span * 0.06
+
+    last_labeled_x = None
+    for index, (x, y, label) in enumerate(zip(xs, ys, labels)):
+        if last_labeled_x is not None and (x - last_labeled_x) < min_gap:
+            continue
+        last_labeled_x = x
+
+        above = index % 2 == 0
         ax.annotate(
             label,
             (x, y),
             textcoords="offset points",
-            xytext=(0, 8),
+            xytext=(0, 8 if above else -18),
             ha="center",
-            fontsize=8,
+            va="bottom" if above else "top",
+            fontsize=7.5,
         )
 
 
@@ -433,7 +452,7 @@ def plot_e9(series: list[dict], out_dir: str | Path) -> list[Path]:
     # 四段严格相加等于总耗时，所以这里画 100% 堆叠柱，不存在"其它"。
     # 这张图回答的是「随实体数增长，钱花在哪变了没有」——
     # 如果通信占比随实体数**下降**，就说明通信层是可扩展的、瓶颈在逻辑侧。
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(11, 5))
     bottoms = [0.0] * len(series)
     for field, label, color, _ in PHASE_SERIES:
         shares = [
