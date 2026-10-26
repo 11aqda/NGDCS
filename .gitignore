@@ -18,3 +18,7 @@ data/
 
 # ---- 工具缓存（matplotlib 字体缓存等）----
 .cache/
+
+# ---- 与本项目无关的临时脚本 ----
+# llm_test.py 是早先试连通性用的，不属于毕设内容，别误提交
+tools/llm_test.py

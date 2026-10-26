@@ -136,7 +136,17 @@ class TickLoopSurvivalTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(game.stats.flush()["hits"], 16)
 
     async def test_no_clients_means_no_serialization(self):
-        """没人连的时候跳过序列化与广播：这是有意的，不是漏做。"""
+        """没人连的时候跳过序列化与广播：这是有意的，不是漏做。
+
+        ⚠️ **不要断言 `ser_ms == 0.0`** —— 四段计时必须**无条件**记录，
+        否则「四段相加恰好等于 tick_ms」这个不变量就破了（见 D-025）。
+        所以"跳过序列化"本身也要花掉一次 `if self.clients` 判断的时间（约亚微秒），
+        取窗口平均后可能舍入到 0.001 ms。断言"恰好等于 0"就会随机失败
+        —— 2026-10-26 实测：循环 20 次挂 3 次（15%），且与端口无关
+        （全测试目录没有一处 bind，唯一的真实 socket 是不占端口的 socketpair）。
+
+        真正**确定性**的证据是：没有生成快照、没有发出任何包。
+        """
         world = World(enemy_target=10, bullet_target=20, seed=1)
         game = GameServer(world=world, print_stats=False)
 
@@ -147,11 +157,19 @@ class TickLoopSurvivalTest(unittest.IsolatedAsyncioTestCase):
             await task
 
         window = game.stats.flush()
+
+        # 逻辑侧照常干活
         self.assertGreater(window["sim_ms"], 0.0)
         self.assertGreater(window["collision_ms"], 0.0)
-        self.assertEqual(window["ser_ms"], 0.0)
-        self.assertEqual(window["net_ms"], 0.0)
+
+        # 确定性证据：什么都没序列化、什么都没发出去
         self.assertEqual(window["snapshot_bytes"], 0)
+        self.assertEqual(window["packets_out"], 0)
+        self.assertEqual(window["bytes_out"], 0)
+
+        # 跳过这两段的**代价**应当可以忽略（而不是"恰好为零"）
+        self.assertLess(window["ser_ms"], 0.1)
+        self.assertLess(window["net_ms"], 0.1)
 
 
 class TickCrashReportTest(unittest.IsolatedAsyncioTestCase):

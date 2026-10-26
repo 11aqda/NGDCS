@@ -712,6 +712,8 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m tools.plot --csv data/serve
 | 16 | 多轮实验的热身数据混进均值 | 服务端**每重启一次 `t_mono` 就从 0 重新开始**，两轮在时间轴上完全重叠；混在一起丢热身会把第二轮的不稳定期当成有效数据 | 场景名加 `-rN` 后缀；`tools/plot.py` **每一轮单独丢热身**后再按档位合并，并打印多轮一致性（03 §7 要求跑 ≥2 次取一致结果） |
 | 17 | **表头 22 列、数据 23 列 → 整列错位，且不报错不崩溃** | 给 `METRICS_FIELDS` 加了 `encode_ms`，但文件里已有 3312 行旧数据。`_open_for_append()` 只在「文件不存在或为空」时写表头，所以**老表头从没更新**；而 `csv.DictWriter` 按 `fieldnames` 顺序写值 → 数据行多一个值。读出来的 `snapshot_bytes` 只有 48 B、`encode_ms` 是空的，**只有人眼比对列数才发现** | ① 新增 `tools/migrate_metrics.py`：按**列名**把旧行迁到新字段表、缺的新列补空值（已在真实数据上执行，有 `.bak` 备份）；② `_open_for_append` 改为**表头不匹配就抛 `MetricsSchemaError` 并指出修法**；③ 表头/写入字段一致性由测试锁住。**教训：append-only CSV + schema 演进是必然会撞上的组合** |
 | 18 | **`ser_ms` 里大部分不是编码** | `ser_ms` 圈的是整个 `build_snapshot()`，其中含 **900 个实体 dataclass 的构造**，而这部分三种编码**共享**。实测 100/800 时共享约 0.55 ms、真正编码只有 0.14~0.64 ms → 用 `ser_ms` 画图 6-2 会得到**三根一样高的柱子** | 拆出 `build_entities()`，加**嵌套计时 `encode_ms`**（嵌在 `ser` 内、**不参与四段相加**、`encode_ms ≤ ser_ms` 恒成立）。**教训：比较两个实现时，先确认计时窗口里没有两者共享的开销** |
+| 19 | **从控制台输出里读数字，读到了错的**（79 538 实际是 89 538） | 用 PowerShell 读日志没加 `-Encoding utf8`，中文报错信息被显示成乱码，**乱码字符吞掉了首位数字**（`?9538`）。据此写进实验记录的结论（"两轮大小不同 = 贴在悬崖边"）**整段是错的** | 读含中文的日志/输出一律 `Get-Content -Encoding utf8`（或 `Select-String -Encoding utf8`）；**关键数字不要从控制台肉眼读**，用脚本正则提取。用户复核后才发现 —— 记这一条是为了下次先自己复核 |
+| 20 | **断言"计时恰好等于 0"的测试必然 flaky**（`test_no_clients_means_no_serialization` 20 次挂 3 次） | 四段计时**必须无条件记录**（否则"四段相加恰好等于 tick_ms"的不变量就破了，见 D-025），所以"跳过序列化"本身也要花掉一次 `if self.clients` 判断的时间（约亚微秒），取窗口平均后可能舍入到 0.001 ms | 改断言**确定性的事实**（`snapshot_bytes == 0`、`packets_out == 0`）而不是"耗时为 0"；耗时可判"可忽略"（`< 0.1 ms`）。**顺带排除**了"固定端口 9527 冲突导致"的猜测：全测试目录没有一处 `bind`，唯一的真实 socket 是不占端口的 `socketpair()` |
 
 ---
 
