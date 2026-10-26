@@ -69,10 +69,41 @@ SCENARIO_FIELDS = [
 ]
 
 
+class MetricsSchemaError(RuntimeError):
+    """已有 CSV 的表头与当前 `METRICS_FIELDS` 不一致。
+
+    追加写 + schema 演进必然会遇到这个问题，而**静默追加的后果是整列错位**：
+    `csv.DictWriter` 按 `fieldnames` 顺序写值，表头少一列就意味着从那一列往后
+    所有值都串位 —— 不报错、不崩溃，只是数据全错。
+    """
+
+
 def _open_for_append(path: Path, fields: list[str]):
-    """打开 CSV 追加写；文件不存在或为空时先写表头。"""
+    """打开 CSV 追加写；文件不存在或为空时先写表头。
+
+    **表头与目标字段不一致时必须报错，不能闷头追加。**
+    2026-10-26 踩过：给 `METRICS_FIELDS` 加了 `encode_ms`，而文件里已有 3312 行旧数据，
+    于是老表头没更新、新行却多写了一个值 —— 2194 行数据整列错位，
+    靠人工比对才发现。现在这种情况会在开跑前就失败，并指出怎么修。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     needs_header = not path.exists() or path.stat().st_size == 0
+
+    if not needs_header:
+        with path.open(encoding="utf-8", newline="") as probe:
+            try:
+                existing = next(csv.reader(probe))
+            except StopIteration:
+                existing = []
+        if existing and existing != list(fields):
+            raise MetricsSchemaError(
+                f"{path} 的表头与当前字段表不一致，拒绝追加（否则整列错位）：\n"
+                f"  文件表头 {len(existing)} 列：{','.join(existing)}\n"
+                f"  当前字段 {len(fields)} 列：{','.join(fields)}\n"
+                f"  修法：python -X utf8 -m tools.migrate_metrics --dry-run 先看，"
+                f"去掉 --dry-run 执行（会自动备份）"
+            )
+
     handle = path.open("a", newline="", encoding="utf-8")
     writer = csv.DictWriter(handle, fieldnames=fields)
     if needs_header:

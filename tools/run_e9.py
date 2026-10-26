@@ -271,7 +271,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--encoders",
         default="",
-        help="要对比的编码器（E1 用），逗号分隔，如 binary,packed,json；"
+        help="要对比的编码器（E1 用），逗号分隔，如 binary,binary_fast,json；"
         "留空 = 不指定（服务端用默认 binary，场景名里也不带编码段，保持 E9 的命名不变）",
     )
     return parser.parse_args()

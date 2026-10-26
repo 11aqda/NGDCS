@@ -1,4 +1,4 @@
-"""阶段 1 · 第 8 步（8a）：服务端 + 占位实体 + 指标落盘。
+﻿"""阶段 1 · 第 8 步（8a）：服务端 + 占位实体 + 指标落盘。
 
 在 7b（输入 + 心跳 + 超时）之上补两件事：
 
@@ -106,7 +106,7 @@ class GameServer:
         self.world = world if world is not None else World()
         self.metrics = metrics
         self.print_stats_enabled = print_stats
-        # 默认标准二进制编码；E1 实验会换成 packed / json（见 protocol/encoders.py）
+        # 默认标准二进制编码；E1 实验会换成 binary_fast / json（见 protocol/encoders.py）
         self.encoder = encoder if encoder is not None else get_encoder("binary")
 
     # ---------------------------------------------------------------- 连接
@@ -401,7 +401,7 @@ def parse_args() -> argparse.Namespace:
         default="binary",
         choices=ENCODER_NAMES,
         help="快照编码器（E1 实验用）：binary = 标准逐条目 pack；"
-        "packed = 同协议的整帧单次 pack（产物逐字节相同，只差实现）；"
+        "binary_fast = 同协议的整帧单次 pack（产物逐字节相同，只差实现）（产物逐字节相同，只差实现）；"
         "json = 短键名 JSON 对照组",
     )
     parser.add_argument("--no-metrics", action="store_true", help="不写指标 CSV")

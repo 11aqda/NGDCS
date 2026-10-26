@@ -3,8 +3,8 @@
 > **新会话请先读这份文件**，再读 `DECISIONS.md`，即可接上全部上下文。
 > 维护约定：每次会话结束前更新本文件。
 
-最后更新：2026-10-25
-当前阶段：**阶段 1：第 8 步 8b「E9 正式实验」完成（18/18 轮达标）→ 下一步：第 9 步 Wireshark 抓包验证（E7）**
+最后更新：2026-10-26
+当前阶段：**阶段 1：E1「协议编码对比」完成（22/24 轮，JSON 在最大规模下无法发送）→ 下一步：E7 Wireshark 抓包验证（需先装 Wireshark）**
 
 ---
 
@@ -641,6 +641,53 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m tools.run_e9 --reset-metric
 E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m tools.plot --csv data/server_metrics.csv --out docs/figures --scenario E9-
 ```
 
+### 2.16 阶段 1 · 第 9 步 E1：协议编码对比（2026-10-26）
+
+| 文件 | 状态 | 说明 |
+|---|---|---|
+| `protocol\encoders.py` | 🆕 新增 | 三变体编码器 + JSON 解码器 + 公平性约定 |
+| `tests\test_encoders.py` | 🆕 新增 | 24 个用例：逐字节全等、往返测试、缓存、值域 |
+| `tools\migrate_metrics.py` | 🆕 新增 | 指标 CSV 表头迁移工具（见坑 #17） |
+| `tests\test_migrate_metrics.py` | 🆕 新增 | 19 个用例：迁移、列名匹配、schema 守卫 |
+| `docs\experiments\E1-协议编码对比.md` | 🆕 新增 | **实验记录** |
+| `docs\figures\fig6-01/02/03-*.png` | 🆕 新增 | 三张 E1 图 |
+| `server\stats.py` | ✏️ 修改 | **嵌套计时** `NESTED_TIMERS = ("encode",)` |
+| `server\main.py` | ✏️ 修改 | `--encoder`；`build_snapshot` 拆出 `build_entities` |
+| `server\metrics.py` | ✏️ 修改 | `encode_ms` 列 + `MetricsSchemaError` 表头守卫 |
+| `tools\run_e9.py` | ✏️ 修改 | `--encoders`，场景名 `E1-<档位>-<编码>-rN` |
+| `tools\plot.py` | ✏️ 修改 | `plot_e1` 出图 6-1/6-2/6-3；`--figures auto` |
+
+**规模**：4 档 × 3 编码 × 2 轮 = **24 轮，74.4 分钟，22/24 达标**。
+
+**三个变体**：`binary`（逐条目 pack）/ `binary_fast`（同协议、逐字节相同、整帧单次 pack）/
+`json`（短键名，编解码双向）。加 `binary_fast` 是为了把**协议优势**和**实现优势**分开。
+
+**核心结果**（两轮均值）：
+
+| 档位 | binary 快照/编码 | binary_fast | json | json/binary |
+|---|---|---|---|---|
+| 30/200 | 1927 B / 0.064 ms | 1927 B / 0.069 | **9076 B / 0.249** | **4.71× / 3.90×** |
+| 100/800 | 7357 B / 0.161 | 7357 B / 0.145 | **34788 B / 0.640** | **4.73× / 3.98×** |
+| 150/1200 | 11007 B / 0.216 | 11007 B / 0.206 | **52097 B / 1.057** | **4.73× / 4.89×** |
+| 250/2000 | 18307 B / 0.360 | 18307 B / 0.323 | ❌ **无法发送** | — |
+
+**四条结论**：
+
+1. **二进制体积优势是结构性的：4.7 倍**（三档稳定复现 4.71/4.73/4.73）
+2. ⭐ **JSON 在 250/2000 规模下根本发不出去**：
+   载荷 **79 538 / 89 538 B** > 协议 64 KiB 帧上限 → 帧层拒绝 → tick 循环崩溃（**两轮可复现**）。
+   同规模二进制只有 18 307 B（上限的 28 %）。
+   **这从"性能差异"升级成了"可用性差异"**
+3. **打包方式不是瓶颈**：`binary_fast` 在小规模反而慢 8 %、大规模快 5~10 %
+   （`encode_ms` 轮间偏差仅 0.4~3.4 %，所以这是信号），
+   但编码只占 tick 的 **1.2~6.8 %** → 换打包方式对总耗时影响 < 0.1 %。
+   **所以第 1 条的结论来自协议形式，不是"把 JSON 写慢了"**
+4. **编码占比随实体数下降**（JSON 从 21.2 % 降到 8.5 %），与 E9 一致：
+   **真正的瓶颈在游戏逻辑侧**
+
+**数据质量**：`tick_ms` 两轮偏差 **0.3~1.7 %**、`encode_ms` **0.4~3.4 %**；
+二进制侧逐字节吻合协议公式偏差 **0 B**；实验期间整机 CPU 0.2~11.8 %（机器空闲，全程未跑其他负载）。
+
 ---
 
 ## 3. 已踩过的坑（重要，别再踩）
@@ -663,6 +710,8 @@ E:\PythonProject\.venv\Scripts\python.exe -X utf8 -m tools.plot --csv data/serve
 | 14 | 服务端**照常监听、照常打印 "player joined"，但客户端 `snapshots: 0`、`errors: 0`** | `tick_loop` 里漏了一行 import（`detect_collisions`），第一个 tick 就抛 `NameError` → **协程静静死掉**。asyncio 只在任务对象被回收时才打印未取回的异常，而 `main()` 一直持有 `tick_task` 引用，所以进程活着的时候什么都不显示 | ① `tick_task.add_done_callback(report_tick_crash)`，崩了立刻带 traceback 报出来；② `tests/test_tick_guard.py` 真跑一遍 tick_loop，名字缺一个就在第一个 tick 失败。**长时间无人值守的实验尤其要防这个** —— 否则会跑完并留下一整份空数据 |
 | 15 | **同一档位跑两轮，CPU% 差 66%**（2.6% vs 0.5%），而 tick 只差 1.5% | 进程 CPU 时间按**调度时钟**更新（Windows 约 15.6 ms 一跳）。服务端每秒只花 ~20 ms CPU 时，单行会读成 0% 或 1.56%，逐秒平均不可信 | CSV 增存**累计 CPU 秒数** `cpu_seconds`；出图改用「**首尾累计差 ÷ 首尾墙钟差**」算整轮 CPU% → 偏差降到 **7.3%**。低于 5% 单核时出图会提示"以 tick 为准" |
 | 16 | 多轮实验的热身数据混进均值 | 服务端**每重启一次 `t_mono` 就从 0 重新开始**，两轮在时间轴上完全重叠；混在一起丢热身会把第二轮的不稳定期当成有效数据 | 场景名加 `-rN` 后缀；`tools/plot.py` **每一轮单独丢热身**后再按档位合并，并打印多轮一致性（03 §7 要求跑 ≥2 次取一致结果） |
+| 17 | **表头 22 列、数据 23 列 → 整列错位，且不报错不崩溃** | 给 `METRICS_FIELDS` 加了 `encode_ms`，但文件里已有 3312 行旧数据。`_open_for_append()` 只在「文件不存在或为空」时写表头，所以**老表头从没更新**；而 `csv.DictWriter` 按 `fieldnames` 顺序写值 → 数据行多一个值。读出来的 `snapshot_bytes` 只有 48 B、`encode_ms` 是空的，**只有人眼比对列数才发现** | ① 新增 `tools/migrate_metrics.py`：按**列名**把旧行迁到新字段表、缺的新列补空值（已在真实数据上执行，有 `.bak` 备份）；② `_open_for_append` 改为**表头不匹配就抛 `MetricsSchemaError` 并指出修法**；③ 表头/写入字段一致性由测试锁住。**教训：append-only CSV + schema 演进是必然会撞上的组合** |
+| 18 | **`ser_ms` 里大部分不是编码** | `ser_ms` 圈的是整个 `build_snapshot()`，其中含 **900 个实体 dataclass 的构造**，而这部分三种编码**共享**。实测 100/800 时共享约 0.55 ms、真正编码只有 0.14~0.64 ms → 用 `ser_ms` 画图 6-2 会得到**三根一样高的柱子** | 拆出 `build_entities()`，加**嵌套计时 `encode_ms`**（嵌在 `ser` 内、**不参与四段相加**、`encode_ms ≤ ser_ms` 恒成立）。**教训：比较两个实现时，先确认计时窗口里没有两者共享的开销** |
 
 ---
 
@@ -724,7 +773,10 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 - [x] **数据采集链路** —— 8a 完成：占位实体（数量可配）+ 每秒 CSV + `tools/plot.py` 出图（D-024）
 - [x] **跑 E9 九档位并出图** —— **8b 完成 2026-10-25**：18/18 轮达标，
   通信占比 73.0 % → 6.7 %、单核跨过 50 % 舒适线（D-026、`docs/experiments/E9-实体数影响.md`）
-- [ ] 其余对比实验（编码 E1 / IO 模型 E3 / 网络损伤 E4-E5 / 同步频率 E5 / 快照策略 E6）
+- [x] **E1 协议编码对比** —— ✅ **2026-10-26 完成**：三变体（binary/binary_fast/json），
+  体积差 **4.7 倍**、**JSON 在 250/2000 规模下超出 64 KiB 帧上限无法发送**、
+  打包方式不是瓶颈（`docs/experiments/E1-协议编码对比.md`）
+- [ ] 其余对比实验（并发 E2 / IO 模型 E3 / 网络损伤 E4-E5 / 同步频率 E5 / 快照策略 E6 / 断线时效 E8）
 - [ ] Wireshark 抓包验证（E7）—— **下一步**，需先装 Wireshark
 - [ ] **`err_px` 插值误差采集未实现** —— E4 的三张图（6-8/6-9/6-10）全部依赖它，目前是隐藏欠账
 

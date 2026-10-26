@@ -47,6 +47,9 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+# 帧载荷上限：图 6-3 要标注"这个规模为什么没有数据点"
+from protocol.framing import MAX_PAYLOAD
+
 # ⚠️ 必须在 import matplotlib **之前**设好缓存目录。
 # matplotlib 默认把字体缓存写到 C:\Users\<用户>\AppData\Local\matplotlib；
 # 那个目录在开发机上不可写，它就会退而在**当前工作目录**建一个 matplotlib-xxxx
@@ -461,17 +464,28 @@ def plot_e1(
 
     if all(point is not None for point in ref_points):
         bars = [
-            ("snapshot_bytes", "平均快照大小 (字节)", "图 6-1 二进制 vs JSON 包大小",
-             "fig6-01-encoder-snapshot-size.png",
-             lambda p: f"{p['snapshot_bytes']:.0f} B"),
-            # 用 **encode_ms** 而不是 ser_ms：ser_ms 含共享的实体对象构造开销
-            #（900 个 dataclass 实例），三种编码都要付，会把差异淹没成三根一样高的柱子
-            ("encode_ms", "编码耗时 (ms)", "图 6-2 二进制 vs JSON 编码耗时",
-             "fig6-02-encoder-ser-time.png",
-             lambda p: f"{p['encode_ms']:.3f} ms"),
+            (
+                "snapshot_bytes", "平均快照大小 (字节)", "图 6-1 二进制 vs JSON 包大小",
+                "fig6-01-encoder-snapshot-size.png",
+                lambda p: f"{p['snapshot_bytes']:.0f} B",
+                # 图注要把口径钉死，否则答辩时说不清这根柱子到底量了什么
+                # （matplotlib 不认 Markdown，别在图上写 ** 号）
+                f"口径：快照载荷（不含 12 B 帧头）；{ref_enemies} 敌机 / {ref_bullets} 子弹、"
+                f"无道具；JSON = list[dict] + separators=(',',':') + ensure_ascii=False",
+            ),
+            (
+                # 用 **encode_ms** 而不是 ser_ms：ser_ms 含共享的实体对象构造开销
+                #（900 个 dataclass 实例），三种编码都要付，会把差异淹没成三根一样高的柱子
+                "encode_ms", "编码耗时 (ms)", "图 6-2 二进制 vs JSON 编码耗时",
+                "fig6-02-encoder-ser-time.png",
+                lambda p: f"{p['encode_ms']:.3f} ms",
+                "口径：encode_ms 只量 encoder.encode() 这一步，不含实体对象构造；\n"
+                "ser_ms 是 tick 四段里的「序列化整段」（= 实体构造 + 编码），"
+                "三种编码的实体构造开销相同",
+            ),
         ]
-        for field, ylabel, title, filename, fmt in bars:
-            fig, ax = plt.subplots(figsize=(7, 4.6))
+        for field, ylabel, title, filename, fmt, caption in bars:
+            fig, ax = plt.subplots(figsize=(7.4, 5.2))
             values = [point[field] for point in ref_points]
             rects = ax.bar(range(len(names)), values, color=colors, width=0.6)
             for rect, value in zip(rects, values):
@@ -479,31 +493,30 @@ def plot_e1(
                     fmt({"snapshot_bytes": value, "encode_ms": value, "ser_ms": value}),
                     (rect.get_x() + rect.get_width() / 2, value),
                     textcoords="offset points", xytext=(0, 4),
-                    ha="center", fontsize=8.5,
+                    ha="center", fontsize=9,
                 )
-            # JSON 比二进制大/慢多少倍，直接标在图上 —— 这正是 E1 的结论
+            # 相对 binary 的倍数直接标在图上 —— 这正是 E1 的结论
             base = values[0]
             if base:
-                ax.set_title(
-                    f"{title}（{ref_enemies} 敌机 / {ref_bullets} 子弹，"
-                    f"相对 binary：{'/'.join(f'{v / base:.1f}×' for v in values)}）",
-                    fontsize=10.5,
-                )
+                ratios = "/".join(f"{v / base:.1f}×" for v in values)
+                ax.set_title(f"{title}\n（相对 binary：{ratios}）", fontsize=11)
             else:
                 ax.set_title(title, fontsize=11)
             ax.set_xticks(range(len(names)))
             ax.set_xticklabels(tick_labels, fontsize=8.5)
             ax.set_ylabel(ylabel)
             ax.grid(alpha=0.3, axis="y")
-            ax.set_ylim(0, max(values) * 1.18 if max(values) else 1)
+            ax.set_ylim(0, max(values) * 1.30 if max(values) else 1)
+            # 图注放在图下方（figure 坐标），不挤压绘图区
+            fig.text(0.02, 0.015, caption, fontsize=7.2, va="bottom", ha="left", color="#444444")
             path = out_dir / filename
-            fig.tight_layout()
+            fig.tight_layout(rect=(0, 0.075, 1, 1))
             fig.savefig(path, dpi=150)
             plt.close(fig)
             written.append(path)
 
     # ---- 图 6-3：CPU 占用随实体数变化（每种编码一条线）----
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8.6, 5.6))
     for name in names:
         series = by_encoder[name]
         ax.plot(
@@ -517,13 +530,57 @@ def plot_e1(
         CPU_COMFORT_PERCENT, color="crimson", linestyle="--", linewidth=1,
         label=f"{CPU_COMFORT_PERCENT:.0f}% 舒适线（D-011）",
     )
+
+    # 有的编码在最高档位**没有数据** —— 那多半不是"漏跑"，而是撞上了协议上限。
+    # 必须在图上标出来，否则读者会以为只是没测，看不到"这条路走不通"这个结论。
+    all_levels = sorted(
+        {
+            (round(item["enemies"]), round(item["bullets"]), item["entities"])
+            for series in by_encoder.values()
+            for item in series
+        },
+        key=lambda triple: triple[2],
+    )
+    peak = max(
+        (item["cpu_percent"] for series in by_encoder.values() for item in series),
+        default=1.0,
+    )
+    for name in names:
+        have = {
+            (round(item["enemies"]), round(item["bullets"])) for item in by_encoder[name]
+        }
+        for enemies, bullets, entities in all_levels:
+            if (enemies, bullets) in have:
+                continue
+            color = ENCODER_COLORS.get(name, "#333333")
+            ax.annotate(
+                f"{ENCODER_LABELS.get(name, name)}\n此规模无法发送\n"
+                f"（载荷超出 {MAX_PAYLOAD // 1024} KiB 帧上限）",
+                xy=(entities, 0.5),
+                xytext=(entities, peak * 0.45),
+                ha="center", fontsize=7.5, color=color,
+                arrowprops=dict(
+                    arrowstyle="->", color=color, linewidth=1.2, linestyle="--"
+                ),
+            )
+
     ax.set_xlabel("同屏实体总数（玩家 + 敌机 + 子弹）")
     ax.set_ylabel("服务端单核占用 (%)")
     ax.set_title("图 6-3 编码方式对 CPU 占用的影响")
+    # 留出右边距：最高档位的"无法发送"标注是以该点为中心排版的，贴边会被裁掉
+    ax.margins(x=0.14)
     ax.grid(alpha=0.3)
-    ax.legend(fontsize=8.5)
+    ax.legend(fontsize=8.5, loc="upper left")
+    fig.text(
+        0.02, 0.015,
+        "口径：CPU 用累计 CPU 秒数的首尾差 ÷ 墙钟首尾差算整轮值；"
+        "低负载（<5%）时逐秒读数受调度计时粒度量化，以 tick_ms 为准。\n"
+        "JSON 在最大规模下没有数据点 = 载荷超出协议帧上限、根本发不出去"
+        "（不是漏测，详见 E1 实验记录）。",
+        fontsize=7.2, va="bottom", ha="left", color="#444444",
+    )
     path = out_dir / "fig6-03-encoder-cpu.png"
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.085, 1, 1))
     fig.savefig(path, dpi=150)
     plt.close(fig)
     written.append(path)
@@ -784,6 +841,30 @@ def main() -> None:
         if not by_encoder:
             print("[plot] 没有可识别的 E1 数据（场景名需形如 E1-e30-b200-json-r1）")
             return
+
+        # E1 的头号指标是 `encode_ms`，所以它的多轮一致性必须单独报 ——
+        # 上面那张表只查了 tick 和 CPU，而"binary_fast 到底有没有更快"
+        # 全靠 encode_ms，不报它的噪声就没法判断几 % 的差是不是信号。
+        print("\n=== E1 编码耗时的一致性（判断几 % 的差异是不是噪声）===")
+        print(f"  {'档位':<26}{'编码':<14}{'轮均值ms':>10}{'轮间偏差':>10}")
+        for level, runs in sorted(
+            per_level_runs.items(), key=lambda kv: kv[1][0]["entities"]
+        ):
+            parsed = split_e1_level(level)
+            encoder = parsed[2] if parsed else "?"
+            values = [r["encode_ms"] for r in runs if r.get("encode_ms")]
+            mean = _mean(values)
+            gap = run_agreement(runs, "encode_ms")
+            note = ""
+            if len(runs) < 2:
+                note = "（只有 1 轮）"
+            elif gap > AGREEMENT_TOLERANCE_PERCENT and mean < 0.2:
+                # 0.2 ms 以下绝对值太小，相对偏差被放大；此时以 tick_ms 为准
+                note = "（绝对值小，相对偏差被放大）"
+            print(
+                f"  {level:<26}{encoder:<14}{mean:>10.4f}{gap:>9.1f}%{note}"
+            )
+
         print(f"\n=== 按编码器分组（{len(by_encoder)} 种）===")
         for name, items in by_encoder.items():
             print(f"  {name:<12} 档位 {len(items)} 个：" +
