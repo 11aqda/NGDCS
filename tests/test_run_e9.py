@@ -15,6 +15,7 @@ from tools.run_e9 import (
     build_server_cmd,
     count_rows,
     format_percent,
+    parse_encoders,
     parse_levels,
     scenario_name,
 )
@@ -35,6 +36,33 @@ class NamingTest(unittest.TestCase):
         # tools/plot.py 靠 `-rN` 后缀解析轮次，命名不能随意改
         self.assertEqual(scenario_name("E9", 30, 200, 2), "E9-e30-b200-r2")
         self.assertEqual(scenario_name("E9", 250, 2000, 1), "E9-e250-b2000-r1")
+
+    def test_scenario_name_with_encoder(self):
+        # E1：编码段在**档位之后、轮次之前**
+        self.assertEqual(
+            scenario_name("E1", 30, 200, 1, "json"), "E1-e30-b200-json-r1"
+        )
+        self.assertEqual(
+            scenario_name("E1", 100, 800, 2, "binary_fast"), "E1-e100-b800-binary_fast-r2"
+        )
+
+    def test_scenario_name_without_encoder_is_unchanged(self):
+        # E9 的命名必须一字不差 —— 已完成的实验记录引用着它
+        self.assertEqual(scenario_name("E9", 30, 200, 1, ""), "E9-e30-b200-r1")
+        self.assertEqual(scenario_name("E9", 30, 200, 1), "E9-e30-b200-r1")
+
+    def test_run_suffix_stays_last(self):
+        # plot.py 用 `-r(\d+)$` 匹配轮次；编码段不能跑到它后面去
+        for encoder in ("json", "binary_fast", "binary"):
+            name = scenario_name("E1", 30, 200, 3, encoder)
+            with self.subTest(encoder=encoder):
+                self.assertTrue(name.endswith("-r3"), name)
+
+    def test_binary_fast_underscore_does_not_break_parsing(self):
+        # 编码名里带下划线，别把 `-e`/`-b` 的解析搞乱
+        name = scenario_name("E1", 250, 2000, 2, "binary_fast")
+        self.assertEqual(name, "E1-e250-b2000-binary_fast-r2")
+        self.assertEqual(name.split("-e")[1].split("-")[0], "250")
 
     def test_default_levels_are_ascending(self):
         # 横轴顺序靠实体总数排序，档位表本身也应当是递增的
@@ -111,6 +139,43 @@ class CommandTest(unittest.TestCase):
 
         self.assertEqual(build_server_cmd(FakeArgs(), 1, 1, "x")[0], sys.executable)
         self.assertEqual(build_bot_cmd(FakeArgs(), "x", Path("o"))[0], sys.executable)
+
+
+class ParseEncodersTest(unittest.TestCase):
+    def test_empty_means_unspecified(self):
+        # 留空 = 不指定编码；场景名里也不带编码段（E9 的命名保持原样）
+        self.assertEqual(parse_encoders(""), ())
+        self.assertEqual(parse_encoders("  ,  "), ())
+
+    def test_single_and_multiple(self):
+        self.assertEqual(parse_encoders("json"), ("json",))
+        self.assertEqual(
+            parse_encoders("binary, binary_fast ,json"),
+            ("binary", "binary_fast", "json"),
+        )
+
+    def test_unknown_encoder_is_rejected(self):
+        # `--encoders jsno` 这种手误必须当场炸，否则会白跑一轮还把数据标错编码
+        with self.assertRaises(ValueError):
+            parse_encoders("jsno")
+
+    def test_all_three_variants_are_available(self):
+        # 拍板要三个变体（binary / binary_fast / json），别只剩两个
+        self.assertEqual(
+            parse_encoders("binary,binary_fast,json"), ("binary", "binary_fast", "json")
+        )
+
+
+class EncoderCommandTest(unittest.TestCase):
+    def test_encoder_flag_passed_through(self):
+        cmd = build_server_cmd(FakeArgs(), 30, 200, "E1-e30-b200-json-r1", "json")
+        self.assertIn("--encoder", cmd)
+        self.assertEqual(cmd[cmd.index("--encoder") + 1], "json")
+
+    def test_no_encoder_flag_when_unspecified(self):
+        # E9 的命令行不能多出 --encoder 参数
+        cmd = build_server_cmd(FakeArgs(), 30, 200, "E9-e30-b200-r1")
+        self.assertNotIn("--encoder", cmd)
 
 
 class CountRowsTest(unittest.TestCase):

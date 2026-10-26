@@ -44,6 +44,7 @@ METRICS_FIELDS = [
     "collision_ms",
     "ser_ms",
     "net_ms",
+    "encode_ms",
     "hits",
     "snapshot_bytes",
     "cpu_percent",
@@ -93,8 +94,8 @@ def write_scenario(
 ) -> None:
     """写一行场景信息（§4.1 的 `server_scenario.csv`）。
 
-    `encoder` / `inject_loss` / `inject_delay` 现在固定为默认值 ——
-    E1（编码对比）和 E4/E5（netem 注入）时才填真实值，先把 schema 定下来。
+    `encoder` 由 E1（编码对比）实际使用；`inject_loss` / `inject_delay`
+    等 E4/E5（netem 注入）实现后才填真实值，先把 schema 定下来。
     """
     path = Path(path)
     handle, writer = _open_for_append(path, SCENARIO_FIELDS)
@@ -238,6 +239,8 @@ class MetricsRecorder:
                 "collision_ms": stats["collision_ms"],
                 "ser_ms": stats["ser_ms"],
                 "net_ms": stats["net_ms"],
+                # 嵌套在 ser 内的细分（不参与四段相加）：E1 的图 6-2 用它
+                "encode_ms": stats["encode_ms"],
                 "hits": stats["hits"],
                 "snapshot_bytes": stats["snapshot_bytes"],
                 "cpu_percent": cpu,

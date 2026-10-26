@@ -34,6 +34,7 @@ def sample_stats(**overrides) -> dict:
         "collision_ms": 0.2,
         "ser_ms": 0.1,
         "net_ms": 0.08,
+        "encode_ms": 0.05,
         "hits": 3,
         "snapshot_bytes": 1939,
         "packets_in": 80,
@@ -189,6 +190,46 @@ class MetricsRecorderTest(unittest.TestCase):
         recorder.close()
 
         self.assertIn("cpu_seconds", read_rows(self.path)[0])
+
+    def test_every_declared_field_is_written(self):
+        """`METRICS_FIELDS` 与 `write()` 必须一一对应。
+
+        这条是补出来的回归测试：加 `encode_ms` 时只改了 METRICS_FIELDS（表头）
+        却忘了 `write()` 里的字段字典，结果是**表头有这一列、数据全是空的** ——
+        不报错、不崩溃，图 6-2 直接画成三根 0 高的柱子。
+        """
+        recorder = self.make()
+        recorder.write(
+            client_count=4, enemies=30, bullets=200, stats=sample_stats()
+        )
+        recorder.close()
+
+        row = read_rows(self.path)[0]
+        self.assertEqual(
+            list(row.keys()),
+            list(METRICS_FIELDS),
+            "CSV 列与 METRICS_FIELDS 不一致",
+        )
+
+    def test_nested_encode_ms_reaches_the_csv(self):
+        # 嵌套计时（encode 在 ser 内）必须真的落到盘上，否则 E1 没数据可画
+        recorder = self.make()
+        recorder.write(
+            client_count=4, enemies=30, bullets=200,
+            stats=sample_stats(encode_ms=0.123),
+        )
+        recorder.close()
+
+        self.assertEqual(read_rows(self.path)[0]["encode_ms"], "0.123")
+
+    def test_encode_ms_is_not_part_of_the_four_phases(self):
+        # encode 是 ser 的**内部细分**，不能混进四段相加（否则 tick_ms 对不上）
+        from server.stats import COMMS_PHASES, LOGIC_PHASES, NESTED_TIMERS, PHASES
+
+        self.assertNotIn("encode", PHASES)
+        self.assertNotIn("encode", LOGIC_PHASES)
+        self.assertNotIn("encode", COMMS_PHASES)
+        self.assertIn("encode", NESTED_TIMERS)
 
 
 class ScenarioFileTest(unittest.TestCase):

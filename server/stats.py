@@ -38,6 +38,19 @@ PHASE_LABELS = {
 LOGIC_PHASES = ("sim", "collision")
 COMMS_PHASES = ("ser", "net")
 
+# **嵌套**在某个阶段内部的细分计时，不参与四段相加。
+#
+# `encode` 嵌在 `ser` 里：`ser` 量的是整个 `build_snapshot()`，其中包含
+# **实体对象的构造**（100 敌机 + 800 子弹 = 900 个 dataclass 实例），
+# 而那一部分是所有编码器共享的。E1 要比"编码方式"的差异，
+# 就必须把 `encoder.encode()` 这一步单独拎出来量 ——
+# 否则三根柱子会被共享开销压成一样高，什么也证明不了。
+#
+# 约束：`encode_ms ≤ ser_ms`（嵌套关系），所以它**不能**和四段一起相加。
+NESTED_TIMERS = ("encode",)
+
+NESTED_LABELS = {"encode": "编码调用（嵌套在序列化内）"}
+
 
 def percentile(values: list[float], p: float) -> float:
     """简单分位数：p=0.5 中位数，p=0.95 是 95% 分位。
@@ -62,6 +75,8 @@ class TickStats:
         self._durations: list[float] = []
         self._phase_totals = {name: 0.0 for name in PHASES}
         self._phase_counts = {name: 0 for name in PHASES}
+        self._nested_totals = {name: 0.0 for name in NESTED_TIMERS}
+        self._nested_counts = {name: 0 for name in NESTED_TIMERS}
         self._hits = 0
         self._packets_in = 0
         self._bytes_in = 0
@@ -82,6 +97,21 @@ class TickStats:
             raise ValueError(f"未知阶段 {phase!r}；可选：{PHASES}")
         self._phase_totals[phase] += duration_s
         self._phase_counts[phase] += 1
+
+    def record_nested(self, timer: str, duration_s: float) -> None:
+        """记某个阶段的**内部细分**计时（秒）。
+
+        与 `record_phase` 的区别：嵌套计时**不参与四段相加** ——
+        它是某一段里的子步骤，量的是"这一段里有多少花在了 X 上"。
+        当前只有 `encode`（嵌在 `ser` 里，见 NESTED_TIMERS 的说明）。
+
+        维护约定：`encode_ms ≤ ser_ms` 必须恒成立，所以调用方要保证
+        计时窗口真的被包在外层阶段里面。
+        """
+        if timer not in self._nested_totals:
+            raise ValueError(f"未知嵌套计时 {timer!r}；可选：{NESTED_TIMERS}")
+        self._nested_totals[timer] += duration_s
+        self._nested_counts[timer] += 1
 
     def record_hits(self, count: int) -> None:
         """记本 tick 碰撞判定命中的对数。
@@ -139,9 +169,18 @@ class TickStats:
                 round(self._phase_totals[phase] / n * 1000, 3) if n else 0.0
             )
 
+        # 嵌套计时：**不参与四段相加**，只说明某一段内部的构成（见 NESTED_TIMERS）
+        for timer in NESTED_TIMERS:
+            n = self._nested_counts[timer]
+            result[f"{timer}_ms"] = (
+                round(self._nested_totals[timer] / n * 1000, 3) if n else 0.0
+            )
+
         self._durations = []
         self._phase_totals = {name: 0.0 for name in PHASES}
         self._phase_counts = {name: 0 for name in PHASES}
+        self._nested_totals = {name: 0.0 for name in NESTED_TIMERS}
+        self._nested_counts = {name: 0 for name in NESTED_TIMERS}
         self._hits = 0
         self._packets_in = 0
         self._bytes_in = 0

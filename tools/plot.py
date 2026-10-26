@@ -85,6 +85,7 @@ NUMERIC_FIELDS = (
     "collision_ms",
     "ser_ms",
     "net_ms",
+    "encode_ms",
     "hits",
     "snapshot_bytes",
     "cpu_percent",
@@ -218,9 +219,16 @@ def summarize(rows: list[dict], warmup_s: float = 10.0) -> dict:
         "bw_per_client_bps": bytes_out / players if players else 0.0,
     }
     summary.update(phases)
+    # **嵌套**计时：`encode_ms` 是 `ser_ms` 内部的细分，不参与四段相加。
+    # E1 的图 6-2 用它 —— 因为 ser_ms 里含共享的实体对象构造开销，会把编码差异淹没。
+    summary["encode_ms"] = _mean(values("encode_ms"))
     # 逻辑侧 / 通信侧：用户要求「碰撞与通信分开」，所以这两条聚合线也要能直接画
     summary["logic_ms"] = phases["sim_ms"] + phases["collision_ms"]
     summary["comms_ms"] = phases["ser_ms"] + phases["net_ms"]
+    # 编码在序列化里的占比：E1 用它说明「ser 里有多少真的花在编码上」
+    summary["encode_share"] = (
+        summary["encode_ms"] / phases["ser_ms"] if phases["ser_ms"] else 0.0
+    )
     return summary
 
 
@@ -356,6 +364,173 @@ def _annotate(ax, xs, ys, labels) -> None:
         )
 
 
+# E1 用：从「已剥掉 -rN 的场景名」里解出档位与编码
+# `E1-e30-b200-json` → 敌机 30 / 子弹 200 / 编码 json
+# `E9-e30-b200`      → 不带编码段，视为 binary（E9 用的就是默认编码）
+_E1_LEVEL = re.compile(r"^(?P<exp>\w+?)-e(?P<enemies>\d+)-b(?P<bullets>\d+)(?:-(?P<encoder>[a-z_]+))?$")
+
+# 图上的固定顺序（三张图、所有柱子/折线都用同一套顺序与颜色，便于对照阅读）
+ENCODER_ORDER = ("binary", "binary_fast", "json")
+ENCODER_LABELS = {
+    "binary": "二进制（逐条目 pack）",
+    "binary_fast": "二进制（整帧单次 pack）",
+    "json": "JSON（短键名）",
+}
+ENCODER_COLORS = {"binary": "#1f77b4", "binary_fast": "#2ca02c", "json": "#ff7f0e"}
+
+
+def split_e1_level(level_key: str) -> tuple[int, int, str] | None:
+    """`E1-e30-b200-json` → `(30, 200, "json")`；解不出来返回 None。
+
+    没有编码段的（`E9-e30-b200`）按 `binary` 处理 —— E9 跑的就是默认编码。
+    """
+    match = _E1_LEVEL.match(level_key)
+    if match is None:
+        return None
+    return (
+        int(match.group("enemies")),
+        int(match.group("bullets")),
+        match.group("encoder") or "binary",
+    )
+
+
+# 场景名里**真的有**编码段（用来决定出哪一套图）。
+# 不能靠"encoder != binary"判断：`E1-...-binary` 是有编码段的，而 `E9-...` 没有。
+_E1_HAS_ENCODER = re.compile(r"-e\d+-b\d+-[a-z_]+$")
+
+
+def has_encoder_segment(level_key: str) -> bool:
+    """场景名里带编码段吗？`E1-e30-b200-json` 是，`E9-e30-b200` 不是。"""
+    return bool(_E1_HAS_ENCODER.search(level_key))
+
+
+def e1_by_encoder(per_level_runs: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """把（已按档位合并的）序列按**编码器**分组，每组内按实体数排序。
+
+    E1 的三张图都是「同一档位下比编码」，或者「同一编码下看趋势」——
+    所以分组维度是编码器，而不是档位。
+    """
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for level_key, runs in per_level_runs.items():
+        parsed = split_e1_level(level_key)
+        if parsed is None:
+            continue
+        _, _, encoder = parsed
+        merged = merge_runs(runs)
+        if not merged:
+            continue
+        merged["encoder"] = encoder
+        grouped[encoder].append(merged)
+
+    for items in grouped.values():
+        items.sort(key=lambda item: item["entities"])
+    # 固定顺序：即使某种编码缺席，图例顺序也不乱跳
+    return {name: grouped[name] for name in ENCODER_ORDER if name in grouped}
+
+
+def _reference_point(series: list[dict], enemies: int, bullets: int) -> dict | None:
+    """取某个档位的数据点（默认取 30/200 —— D-011 的设计目标规模）。"""
+    for item in series:
+        if round(item["enemies"]) == enemies and round(item["bullets"]) == bullets:
+            return item
+    return None
+
+
+def plot_e1(
+    by_encoder: dict[str, list[dict]],
+    out_dir: str | Path,
+    reference: tuple[int, int] = (30, 200),
+) -> list[Path]:
+    """出 E1 的三张图（图 6-1 / 6-2 / 6-3）。返回写出的文件路径。"""
+    if not HAVE_MPL:
+        raise RuntimeError("需要 matplotlib 才能出图：pip install matplotlib")
+    if not by_encoder:
+        raise ValueError("没有 E1 数据；确认场景名形如 E1-e30-b200-json-r1")
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    names = list(by_encoder)
+    colors = [ENCODER_COLORS.get(name, "#333333") for name in names]
+    tick_labels = [ENCODER_LABELS.get(name, name) for name in names]
+
+    # ---- 图 6-1 / 6-2：同一档位下的柱状对比 ----
+    ref_enemies, ref_bullets = reference
+    ref_points = [_reference_point(by_encoder[name], ref_enemies, ref_bullets) for name in names]
+
+    if all(point is not None for point in ref_points):
+        bars = [
+            ("snapshot_bytes", "平均快照大小 (字节)", "图 6-1 二进制 vs JSON 包大小",
+             "fig6-01-encoder-snapshot-size.png",
+             lambda p: f"{p['snapshot_bytes']:.0f} B"),
+            # 用 **encode_ms** 而不是 ser_ms：ser_ms 含共享的实体对象构造开销
+            #（900 个 dataclass 实例），三种编码都要付，会把差异淹没成三根一样高的柱子
+            ("encode_ms", "编码耗时 (ms)", "图 6-2 二进制 vs JSON 编码耗时",
+             "fig6-02-encoder-ser-time.png",
+             lambda p: f"{p['encode_ms']:.3f} ms"),
+        ]
+        for field, ylabel, title, filename, fmt in bars:
+            fig, ax = plt.subplots(figsize=(7, 4.6))
+            values = [point[field] for point in ref_points]
+            rects = ax.bar(range(len(names)), values, color=colors, width=0.6)
+            for rect, value in zip(rects, values):
+                ax.annotate(
+                    fmt({"snapshot_bytes": value, "encode_ms": value, "ser_ms": value}),
+                    (rect.get_x() + rect.get_width() / 2, value),
+                    textcoords="offset points", xytext=(0, 4),
+                    ha="center", fontsize=8.5,
+                )
+            # JSON 比二进制大/慢多少倍，直接标在图上 —— 这正是 E1 的结论
+            base = values[0]
+            if base:
+                ax.set_title(
+                    f"{title}（{ref_enemies} 敌机 / {ref_bullets} 子弹，"
+                    f"相对 binary：{'/'.join(f'{v / base:.1f}×' for v in values)}）",
+                    fontsize=10.5,
+                )
+            else:
+                ax.set_title(title, fontsize=11)
+            ax.set_xticks(range(len(names)))
+            ax.set_xticklabels(tick_labels, fontsize=8.5)
+            ax.set_ylabel(ylabel)
+            ax.grid(alpha=0.3, axis="y")
+            ax.set_ylim(0, max(values) * 1.18 if max(values) else 1)
+            path = out_dir / filename
+            fig.tight_layout()
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            written.append(path)
+
+    # ---- 图 6-3：CPU 占用随实体数变化（每种编码一条线）----
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for name in names:
+        series = by_encoder[name]
+        ax.plot(
+            [item["entities"] for item in series],
+            [item["cpu_percent"] for item in series],
+            marker="o", linewidth=1.8, markersize=6,
+            color=ENCODER_COLORS.get(name, "#333333"),
+            label=ENCODER_LABELS.get(name, name),
+        )
+    ax.axhline(
+        CPU_COMFORT_PERCENT, color="crimson", linestyle="--", linewidth=1,
+        label=f"{CPU_COMFORT_PERCENT:.0f}% 舒适线（D-011）",
+    )
+    ax.set_xlabel("同屏实体总数（玩家 + 敌机 + 子弹）")
+    ax.set_ylabel("服务端单核占用 (%)")
+    ax.set_title("图 6-3 编码方式对 CPU 占用的影响")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8.5)
+    path = out_dir / "fig6-03-encoder-cpu.png"
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    written.append(path)
+
+    return written
+
+
 def plot_e9(series: list[dict], out_dir: str | Path) -> list[Path]:
     """出 E9 的三张图。返回写出的文件路径。"""
     if not HAVE_MPL:
@@ -488,7 +663,7 @@ def plot_e9(series: list[dict], out_dir: str | Path) -> list[Path]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="出 E9 的四张图（图 6-17 / 6-18 / 6-19 / 6-20）"
+        description="出图：E9 四张（图 6-17~6-20）或 E1 三张（图 6-1~6-3）"
     )
     parser.add_argument("--csv", default="data/server_metrics.csv", help="指标 CSV")
     parser.add_argument("--out", default="docs/figures", help="图片输出目录")
@@ -501,7 +676,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--scenario",
         default="",
-        help="只看 scenario_id 以它开头的场景（如 E9-）",
+        help="只看 scenario_id 以它开头的场景（如 E9- / E1-）",
+    )
+    parser.add_argument(
+        "--figures",
+        default="auto",
+        choices=("auto", "e9", "e1"),
+        help="出哪一套图。auto = 数据里带编码段就出 E1 的三张，"
+        "否则出 E9 的四张（E1/E9 数据同时存在时按 --scenario 过滤后再判断）",
     )
     return parser.parse_args()
 
@@ -592,6 +774,31 @@ def main() -> None:
         print(f"  → {flagged} 个档位偏差超过 {AGREEMENT_TOLERANCE_PERCENT:.0f}%，先别急着写进论文")
     else:
         print("  → 全部在容差内，可作正式数据")
+
+    figure_set = args.figures
+    if figure_set == "auto":
+        figure_set = "e1" if any(has_encoder_segment(k) for k in per_level_runs) else "e9"
+
+    if figure_set == "e1":
+        by_encoder = e1_by_encoder(per_level_runs)
+        if not by_encoder:
+            print("[plot] 没有可识别的 E1 数据（场景名需形如 E1-e30-b200-json-r1）")
+            return
+        print(f"\n=== 按编码器分组（{len(by_encoder)} 种）===")
+        for name, items in by_encoder.items():
+            print(f"  {name:<12} 档位 {len(items)} 个：" +
+                  ", ".join(f"{i['enemies']:.0f}/{i['bullets']:.0f}" for i in items))
+            for item in items:
+                print(
+                    f"    实体 {item['entities']:>5.0f}  快照 {item['snapshot_bytes']:>7.0f} B"
+                    f"  编码 {item['encode_ms']:>6.3f} ms"
+                    f"（占序列化 {item['encode_share'] * 100:>4.1f}%）"
+                    f"  序列化 {item['ser_ms']:>6.3f} ms  广播 {item['net_ms']:>6.3f} ms"
+                    f"  总 {item['tick_ms_avg']:>7.3f} ms  CPU {item['cpu_percent']:>5.1f}%"
+                )
+        for path in plot_e1(by_encoder, args.out):
+            print(f"[plot] 已写出 {path}")
+        return
 
     for path in plot_e9(series, args.out):
         print(f"[plot] 已写出 {path}")

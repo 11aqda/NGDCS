@@ -48,7 +48,8 @@ from protocol.messages import (
     unpack_heartbeat,
     unpack_keys,
 )
-from protocol.snapshot import PlayerSnapshot, pack_snapshot
+from protocol.snapshot import PlayerSnapshot
+from protocol.encoders import ENCODER_NAMES, SnapshotEncoder, get_encoder
 from server.entities import World, detect_collisions
 from server.metrics import MetricsRecorder, write_scenario
 from server.movement import apply_input
@@ -94,6 +95,7 @@ class GameServer:
         world: World | None = None,
         metrics: MetricsRecorder | None = None,
         print_stats: bool = True,
+        encoder: SnapshotEncoder | None = None,
     ) -> None:
         self.clients: dict[int, Client] = {}
         self.next_id = 1
@@ -104,6 +106,8 @@ class GameServer:
         self.world = world if world is not None else World()
         self.metrics = metrics
         self.print_stats_enabled = print_stats
+        # 默认标准二进制编码；E1 实验会换成 packed / json（见 protocol/encoders.py）
+        self.encoder = encoder if encoder is not None else get_encoder("binary")
 
     # ---------------------------------------------------------------- 连接
 
@@ -204,7 +208,13 @@ class GameServer:
             return []
         return [c for c in self.clients.values() if now - c.last_recv_at > self.timeout]
 
-    def build_snapshot(self) -> bytes:
+    def build_entities(self):
+        """把世界状态取成快照用的实体列表（**与编码方式无关**）。
+
+        单独拆出来是为了 E1：这一步要造 100 敌机 + 800 子弹 = 900 个 dataclass 实例，
+        而**三种编码器都要付这笔钱**。如果它和 `encoder.encode()` 混在一个计时窗口里，
+        编码方式的差异会被共享开销淹没 —— 图 6-2 会变成三根一样高的柱子。
+        """
         players = [
             PlayerSnapshot(
                 player_id=client.player_id,
@@ -217,12 +227,16 @@ class GameServer:
             )
             for client in sorted(self.clients.values(), key=lambda c: c.player_id)
         ]
-        payload = pack_snapshot(
-            self.tick,
-            players,
-            enemies=self.world.snapshot_enemies(),
-            bullets=self.world.snapshot_bullets(),
-        )
+        return players, self.world.snapshot_enemies(), self.world.snapshot_bullets()
+
+    def build_snapshot(self) -> bytes:
+        players, enemies, bullets = self.build_entities()
+
+        # 只把 `encoder.encode()` 这一步单独计时（嵌套在 ser 内，见 stats.NESTED_TIMERS）
+        encode_started = time.perf_counter()
+        payload = self.encoder.encode(self.tick, players, enemies, bullets)
+        self.stats.record_nested("encode", time.perf_counter() - encode_started)
+
         self.stats.record_snapshot(len(payload))
         return payload
 
@@ -382,6 +396,14 @@ def parse_args() -> argparse.Namespace:
         "--scenario", default="", help="场景 ID，写进指标每一行；默认 adhoc"
     )
     parser.add_argument("--metrics", default=DEFAULT_METRICS_PATH, help="指标 CSV 路径")
+    parser.add_argument(
+        "--encoder",
+        default="binary",
+        choices=ENCODER_NAMES,
+        help="快照编码器（E1 实验用）：binary = 标准逐条目 pack；"
+        "packed = 同协议的整帧单次 pack（产物逐字节相同，只差实现）；"
+        "json = 短键名 JSON 对照组",
+    )
     parser.add_argument("--no-metrics", action="store_true", help="不写指标 CSV")
     parser.add_argument(
         "--no-stats", action="store_true", help="不打印每秒统计（照旧写 CSV）"
@@ -409,6 +431,7 @@ async def main(args: argparse.Namespace) -> None:
                 bullets=args.bullets,
                 tick_rate=TICK_HZ,
                 seed=args.seed,
+                encoder=args.encoder,
             )
         print(f"[server] metrics -> {args.metrics} (scenario={metrics.scenario_id})")
 
@@ -417,13 +440,15 @@ async def main(args: argparse.Namespace) -> None:
         world=world,
         metrics=metrics,
         print_stats=not args.no_stats,
+        encoder=get_encoder(args.encoder),
     )
 
     server = await asyncio.start_server(game.handle_client, HOST, args.port)
     timeout_text = f"{args.timeout:g}s" if args.timeout > 0 else "off"
     print(
         f"[server] listening on {HOST}:{args.port} (timeout {timeout_text}, "
-        f"enemies {args.enemies}, bullets {args.bullets}, seed {args.seed})"
+        f"enemies {args.enemies}, bullets {args.bullets}, seed {args.seed}, "
+        f"encoder {args.encoder})"
     )
 
     tick_task = asyncio.create_task(game.tick_loop())

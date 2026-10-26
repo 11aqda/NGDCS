@@ -58,6 +58,8 @@ def make_row(
         "collision_ms": tick_ms * 0.6,
         "ser_ms": tick_ms * 0.2,
         "net_ms": tick_ms * 0.1,
+        # 嵌套在 ser 内的编码细分（E1 用）；取 ser 的一半，保持 ser_ms >= encode_ms
+        "encode_ms": tick_ms * 0.1,
         "hits": 0,
         "snapshot_bytes": snapshot_bytes,
         "cpu_percent": cpu_percent,

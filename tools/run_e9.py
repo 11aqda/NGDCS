@@ -37,6 +37,8 @@ import sys
 import time
 from pathlib import Path
 
+from protocol.encoders import ENCODER_NAMES
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # E9 的档位（敌机, 子弹）。
@@ -57,9 +59,19 @@ DEFAULT_LEVELS = (
 CRASH_MARKER = "tick loop 已崩溃"
 
 
-def scenario_name(prefix: str, enemies: int, bullets: int, rep: int) -> str:
-    """`E9-e30-b200-r2` —— 档位 + 轮次，`tools/plot.py` 按这个命名解析。"""
-    return f"{prefix}-e{enemies}-b{bullets}-r{rep}"
+def scenario_name(
+    prefix: str, enemies: int, bullets: int, rep: int, encoder: str = ""
+) -> str:
+    """`E9-e30-b200-r2` / `E1-e30-b200-json-r1` —— 档位 + 轮次（+ 编码）。
+
+    编码段插在**档位之后、轮次之前**，于是：
+
+    - `--scenario E1-` 切出整个 E1 实验
+    - `--scenario E9-` 切出整个 E9 实验（E9 不带编码段，命名一字未变）
+    - `tools/plot.py` 用 `-r(\\d+)$` 解析轮次，后缀仍在最后，不受影响
+    """
+    tail = f"-{encoder}" if encoder else ""
+    return f"{prefix}-e{enemies}-b{bullets}{tail}-r{rep}"
 
 
 def parse_levels(text: str) -> tuple[tuple[int, int], ...]:
@@ -76,8 +88,19 @@ def parse_levels(text: str) -> tuple[tuple[int, int], ...]:
     return tuple(levels)
 
 
-def build_server_cmd(args, enemies: int, bullets: int, name: str) -> list[str]:
-    return [
+def parse_encoders(text: str) -> tuple[str, ...]:
+    """解析 `binary,json` 这种写法；空串 = 不指定编码（场景名里也不带）。"""
+    names = tuple(chunk.strip() for chunk in text.split(",") if chunk.strip())
+    for name in names:
+        if name not in ENCODER_NAMES:
+            raise ValueError(f"未知编码器 {name!r}；可选：{', '.join(ENCODER_NAMES)}")
+    return names
+
+
+def build_server_cmd(
+    args, enemies: int, bullets: int, name: str, encoder: str = ""
+) -> list[str]:
+    cmd = [
         sys.executable, "-X", "utf8", "-u", "-m", "server.main",
         str(args.port),
         "--enemies", str(enemies),
@@ -86,6 +109,9 @@ def build_server_cmd(args, enemies: int, bullets: int, name: str) -> list[str]:
         "--metrics", str(args.metrics),
         "--seed", str(args.seed),
     ]
+    if encoder:
+        cmd += ["--encoder", encoder]
+    return cmd
 
 
 def build_bot_cmd(args, name: str, out_path: Path) -> list[str]:
@@ -121,8 +147,8 @@ def count_rows(csv_path: Path, scenario: str) -> int:
     return count
 
 
-def run_one(args, enemies: int, bullets: int, rep: int) -> dict:
-    name = scenario_name(args.prefix, enemies, bullets, rep)
+def run_one(args, enemies: int, bullets: int, rep: int, encoder: str = "") -> dict:
+    name = scenario_name(args.prefix, enemies, bullets, rep, encoder)
     log_path = args.log_dir / f"{name}.log"
     bot_json = args.run_dir / f"{name}.json"
 
@@ -131,6 +157,7 @@ def run_one(args, enemies: int, bullets: int, rep: int) -> dict:
         "enemies": enemies,
         "bullets": bullets,
         "rep": rep,
+        "encoder": encoder or "",
         "clients_requested": args.clients,
         "duration_s": args.duration,
     }
@@ -143,7 +170,7 @@ def run_one(args, enemies: int, bullets: int, rep: int) -> dict:
 
     with log_path.open("w", encoding="utf-8") as log:
         server = subprocess.Popen(
-            build_server_cmd(args, enemies, bullets, name),
+            build_server_cmd(args, enemies, bullets, name, encoder),
             cwd=PROJECT_ROOT,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -241,20 +268,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dry-run", action="store_true", help="只打印计划，不执行")
     parser.add_argument("--stop-on-fail", action="store_true", help="有一轮不达标就停下")
+    parser.add_argument(
+        "--encoders",
+        default="",
+        help="要对比的编码器（E1 用），逗号分隔，如 binary,packed,json；"
+        "留空 = 不指定（服务端用默认 binary，场景名里也不带编码段，保持 E9 的命名不变）",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     levels = parse_levels(args.levels) if args.levels else DEFAULT_LEVELS
+    encoders = parse_encoders(args.encoders)
+    combos = [(e, b, enc) for enc in (encoders or ("",)) for e, b in levels]
 
     per_round = args.startup + args.duration + args.teardown + 3
-    total_rounds = len(levels) * args.reps
+    total_rounds = len(combos) * args.reps
 
     log(f"Python：{sys.executable}")
-    log(f"档位 {len(levels)} 个 × {args.reps} 轮 = {total_rounds} 轮")
+    log(f"档位 {len(levels)} 个 × 编码 {len(encoders) or 1} 种 × {args.reps} 轮 = {total_rounds} 轮")
     log(f"每轮约 {per_round:.0f} 秒 → 预计 {total_rounds * per_round / 60:.0f} 分钟")
     log(f"控制变量：{args.clients} 个机器人、seed {args.seed}、ramp {args.ramp}")
+    log(f"编码器：{', '.join(encoders) if encoders else 'binary（默认，场景名不带编码段）'}")
     log(f"指标 CSV：{args.metrics}")
 
     if args.reset_metrics and args.metrics.exists():
@@ -269,9 +305,10 @@ def main() -> None:
     if args.dry_run:
         print()
         for rep in range(1, args.reps + 1):
-            for enemies, bullets in levels:
-                name = scenario_name(args.prefix, enemies, bullets, rep)
-                print(f"  {name:<24} 敌机 {enemies:>3}  子弹 {bullets:>4}  "
+            for enemies, bullets, encoder in combos:
+                name = scenario_name(args.prefix, enemies, bullets, rep, encoder)
+                enc_text = f"编码 {encoder or 'binary':<7}"
+                print(f"  {name:<28} {enc_text} 敌机 {enemies:>3}  子弹 {bullets:>4}  "
                       f"{args.duration:.0f}s × {args.clients} 机器人")
         print("\n（--dry-run：没有真的执行）")
         return
@@ -281,12 +318,12 @@ def main() -> None:
 
     for rep in range(1, args.reps + 1):
         log(f"===== 第 {rep} 轮开始 =====")
-        for index, (enemies, bullets) in enumerate(levels, start=1):
-            name = scenario_name(args.prefix, enemies, bullets, rep)
-            log(f"  [{rep}.{index}/{len(levels)}] {name} 开始"
-                f"（敌机 {enemies} 子弹 {bullets}）")
+        for index, (enemies, bullets, encoder) in enumerate(combos, start=1):
+            name = scenario_name(args.prefix, enemies, bullets, rep, encoder)
+            log(f"  [{rep}.{index}/{len(combos)}] {name} 开始"
+                f"（编码 {encoder or 'binary'}，敌机 {enemies} 子弹 {bullets}）")
 
-            result = run_one(args, enemies, bullets, rep)
+            result = run_one(args, enemies, bullets, rep, encoder)
             results.append(result)
 
             status = "OK " if result["ok"] else "!!!"
