@@ -26,7 +26,7 @@
 | 图 6-13 | 三种快照策略带宽对比 | 柱状 | E6 | — | ⬜ 只做理论讨论 |
 | 图 6-14 | 抓包总览 | 事件时间线 | E7 | 🤖 `plot_e7` | ✅ `fig6-14-capture-overview.png` |
 | 图 6-15 | 快照报文逐字段标注 | 十六进制+表格 | E7 | 🤖 `plot_e7` | ✅ `fig6-15-frame-header.png` |
-| 图 6-16 | 粘包 / 半包解析对比 | **截图** | E7 | 📷 Wireshark | ⬜ 未做 |
+| 图 6-16 | 粘包 / 半包解析对比 | 对比图 | E7 | 🤖 `plot_e7`（演示 pcap） | ⬜ 未做 |
 | 图 6-17 | 实体数 vs 单帧耗时（按阶段拆解） | 多线 | E9 | 🤖 `plot_e9` | ✅ `fig6-17-entities-vs-tick.png` |
 | 图 6-18 | 实体数 vs 带宽 | 折线 | E9 | 🤖 `plot_e9` | ✅ `fig6-18-entities-vs-bandwidth.png` |
 | 图 6-19 | 实体数 vs 单核占用 | 折线 | E9 | 🤖 `plot_e9` | ✅ `fig6-19-entities-vs-cpu.png` |
@@ -40,7 +40,7 @@
 |---|---|
 | 图 6-14 | `fig6-14-capture-overview.png` |
 | 图 6-15 | `fig6-15-frame-header.png` |
-| 图 6-16 | `fig6-16-sticky-half-packet.png` |
+| 图 6-16 | `fig6-16-sticky-half-packet.png`（生成图） |
 
 > **2026-10-27 变更**：图 6-14 / 6-15 原计划是 Wireshark 截图，实际改成了
 > **`tools/plot_e7.py` 从抓包文件生成**（`03 §6` 里标的"截图"类型因此变成"生成图"）。
@@ -51,15 +51,18 @@
 > **原始截图保留为证据**：`_raw-fig6-14.png` / `_raw-fig6-15.png`。
 > 答辩若被问"这是真抓的还是画的"，把原图拿出来即可。
 >
+> **正文用哪张**：6-14/6-15/6-16 三张正文都用生成的 `fig6-*.png`；
+> `_raw-fig6-14.png` / `_raw-fig6-15.png` 只作附录/答辩证据，不要塞进正文。
+>
 > **重新生成**：
 > ```powershell
 > .venv\Scripts\python.exe -X utf8 -m tools.plot_e7 --pcap data/E7-capture.pcapng
 > ```
 > （依赖 `D:\Tools\Wireshark\tshark.exe`，路径可用 `--tshark` 覆盖）
 
-## 三、手工截图的具体要求（图 6-16 仍走这条路）
+## 三、原始截图的具体要求（仅附录/证据；正文 6-16 用生成图）
 
-**截图要求**（写进论文的图，质量要够）：
+**原始截图要求**（如果放附录/答辩，质量要够）：
 
 1. **只截目标窗口**，不要把整个桌面/浏览器/其他软件截进去
 2. **用 PNG**，不要 JPG（JPG 会把文字和十六进制糊掉）
