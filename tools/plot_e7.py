@@ -377,9 +377,216 @@ def plot_timeline(pcap: Path, tshark: Path, out_path: Path) -> dict:
     return totals
 
 
+def read_stream(pcap: Path, tshark: Path, server_port: int) -> list[dict]:
+    """按时间顺序取出「服务端 → 客户端」的每个有载荷 TCP 段。
+
+    返回列表，每项 `{"frame": 帧号, "time": 相对时间, "payload": bytes}`。
+    """
+    cmd = [
+        str(tshark), "-r", str(pcap), "-T", "fields",
+        "-e", "frame.number", "-e", "frame.time_relative",
+        "-e", "tcp.srcport", "-e", "tcp.len", "-e", "tcp.payload",
+    ]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    segs: list[dict] = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 5:
+            continue
+        number, rel, src, length, payload = parts
+        if not length or int(length or 0) == 0 or not payload:
+            continue
+        if src != str(server_port):
+            continue
+        segs.append({
+            "frame": int(number),
+            "time": float(rel),
+            "payload": bytes.fromhex(payload.strip()),
+        })
+    return segs
+
+
+def parse_frames(stream: bytes) -> list[tuple[int, int, int]]:
+    """用**项目自己的解析器**把字节流切成帧，返回 [(起始偏移, 长度, 类型)]。
+
+    这一步很关键：图上的「协议帧边界」不是按预期画上去的，
+    而是**拿真实抓到的字节喂给 `FrameParser` 解出来的** ——
+    等于在抓包数据上又跑了一遍收发逻辑。
+    """
+    from protocol.framing import FrameParser
+
+    parser = FrameParser()
+    parser.feed(stream)
+    starts: list[tuple[int, int]] = []
+    consumed = 0
+    while True:
+        before = len(parser.buffer)
+        frame = parser.next_frame()
+        if frame is None:
+            break
+        length = before - len(parser.buffer)
+        starts.append((consumed, length))
+        consumed += length
+
+    return [(start, length, stream[start + 3]) for start, length in starts]
+
+
+def plot_split(pcap: Path, tshark: Path, port: int, out_path: Path) -> dict:
+    """出「粘包 / 半包」对比图（图 6-16）。
+
+    **同时画两套边界**：
+    - 上排：TCP **段**边界（来自抓包，一个 `tcp.len > 0` 就是一个段）
+    - 下排：协议**帧**边界（把各段字节拼成流后，用 `FrameParser` 解出来的）
+
+    两者的错位正是本图要说明的事：一个段里可能有多个帧；一个帧也可能横跨多个段。
+    """
+    from protocol.messages import C_INPUT, S_SNAPSHOT
+
+    segs = read_stream(pcap, tshark, port)
+    if len(segs) < 2:
+        raise SystemExit(f"抓包里只有 {len(segs)} 个服务端数据段，不够画对比图")
+
+    stream = b"".join(s["payload"] for s in segs)
+    frames = parse_frames(stream)
+
+    seg_bounds: list[tuple[int, int, dict]] = []
+    cursor = 0
+    for s in segs:
+        seg_bounds.append((cursor, cursor + len(s["payload"]), s))
+        cursor += len(s["payload"])
+
+    # 自动识别两类形态：
+    #   粘包 = 某个段里装了 ≥ 2 个帧
+    #   半包 = 某个帧横跨 ≥ 2 个段
+    sticky_seg = None
+    for start, end, s in seg_bounds:
+        inside = [f for f in frames if start <= f[0] < end]
+        if len(inside) >= 2:
+            sticky_seg = (start, end, s, inside)
+            break
+
+    half_frame = None
+    for fstart, flen, ftype in frames:
+        spanning = [sb for sb in seg_bounds if sb[0] < fstart + flen and sb[1] > fstart]
+        if len(spanning) >= 2:
+            half_frame = (fstart, flen, ftype, spanning)
+            break
+
+    if sticky_seg is None or half_frame is None:
+        raise SystemExit(
+            "没抓到想要的形态："
+            f"粘包段={'有' if sticky_seg else '无'}，半包帧={'有' if half_frame else '无'}；"
+            "重跑 tools.demo_e7_split 并调整 --half-gap"
+        )
+
+    fig, axes = plt.subplots(2, 1, figsize=(11.6, 5.0),
+                             gridspec_kw={"height_ratios": [1, 1], "hspace": 0.38})
+
+    def draw_panel(ax, title, seg_list, frame_list, total):
+        ax.set_xlim(-total * 0.10, total * 1.03)
+        ax.set_ylim(-0.55, 2.30)
+        ax.axis("off")
+        ax.set_title(title, fontsize=10.8, pad=12)
+
+        narrow = total * 0.14  # 窄于此比例的段，标签要拉出去画，否则挤成一条线
+
+        for idx, (s0, s1, s) in enumerate(seg_list):
+            ax.add_patch(plt.Rectangle((s0, 1.30), s1 - s0, 0.50,
+                                       facecolor="#dbeafe", edgecolor="#1d4ed8", linewidth=1.3))
+            if s1 - s0 > narrow:
+                ax.text((s0 + s1) / 2, 1.55, f"段 {idx + 1}（{s1 - s0} B）",
+                        ha="center", va="center", fontsize=9.5,
+                        color="#1e40af", fontweight="bold")
+            else:
+                # 窄段：用引出线标到下方，否则字挤不下
+                ax.annotate(
+                    f"段 {idx + 1}（{s1 - s0} B）",
+                    xy=(s1, 1.30), xytext=(total * 0.16, 0.98),
+                    fontsize=8.8, color="#1e40af", fontweight="bold",
+                    ha="left", va="center",
+                    arrowprops=dict(arrowstyle="->", color="#1d4ed8", linewidth=1.1,
+                                    connectionstyle="arc3,rad=-0.25"),
+                )
+        ax.text(-total * 0.075, 1.55, "TCP 段", ha="right", va="center",
+                fontsize=10, color="#1d4ed8", fontweight="bold")
+
+        for idx, (f0, flen, ftype) in enumerate(frame_list):
+            kind = {C_INPUT: "C_INPUT", S_SNAPSHOT: "S_SNAPSHOT"}.get(ftype, f"0x{ftype:02X}")
+            ax.add_patch(plt.Rectangle((f0, 0.35), flen, 0.50,
+                                       facecolor="#dcfce7", edgecolor="#15803d", linewidth=1.3))
+            if flen > narrow:
+                ax.text((f0 + flen) / 2, 0.60, f"帧 {idx + 1}：{kind}（{flen} B）",
+                        ha="center", va="center", fontsize=9.5,
+                        color="#166534", fontweight="bold")
+        ax.text(-total * 0.075, 0.60, "协议帧", ha="right", va="center",
+                fontsize=10, color="#15803d", fontweight="bold")
+
+        # 段边界（蓝实线）/ 帧边界（绿虚线）—— 两者错位正是本图的论点
+        for s0, s1, _ in seg_list:
+            for x in (s0, s1):
+                ax.plot([x, x], [0.30, 1.86], color="#1d4ed8", linewidth=1.5,
+                        linestyle="-", alpha=0.85)
+        for f0, flen, _ in frame_list:
+            for x in (f0, f0 + flen):
+                ax.plot([x, x], [0.14, 0.90], color="#15803d", linewidth=1.5,
+                        linestyle="--", alpha=0.9)
+
+        # 十六进制预览**只给够宽的段画**，否则窄段的文字会叠在一起。
+            # ⚠️ 前缀只能用 ASCII：这段文字用 monospace 字族，中文字形不在该字族里，
+            #    混进来会渲染成一串方块（第一版就踩了）。
+            preview = " ".join(f"{b:02x}" for b in s["payload"][:8])
+            ax.text(s0, 2.12, f"hex {preview} ...", ha="left", va="center",
+                    family="monospace", fontsize=7.8, color="#374151")
+
+        ax.set_xlabel("字节流偏移 (B)", fontsize=9.5, labelpad=16)
+
+    s0, s1, seg, inside = sticky_seg
+    draw_panel(
+        axes[0],
+        f"图 6-16（上）粘包：一次 sendall 发出的 {s1 - s0} B 落在同一个 TCP 段里，"
+        f"内含 {len(inside)} 个协议帧（抓包第 {seg['frame']} 帧）",
+        [(0, s1 - s0, seg)],
+        [(f[0] - s0, f[1], f[2]) for f in inside],
+        s1 - s0,
+    )
+
+    fstart, flen, ftype, spanning = half_frame
+    gap = spanning[1][2]["time"] - spanning[0][2]["time"]
+    draw_panel(
+        axes[1],
+        f"图 6-16（下）半包：一个 {flen} B 的协议帧被拆进 {len(spanning)} 个 TCP 段"
+        f"（先到 {len(spanning[0][2]['payload'])} B 帧头，隔 {gap:.3f} s 后载荷才到）",
+        [(sb[0] - fstart, sb[1] - fstart, sb[2]) for sb in spanning],
+        [(0, flen, ftype)],
+        flen,
+    )
+
+    fig.text(
+        0.012, 0.012,
+        "说明：TCP 是字节流，拆合边界不固定 —— 同一份应用层数据，内核可能合成一段发出，也可能拆成几段，"
+        "所以游戏正常流量抓不到稳定形态，本图由 tools/demo_e7_split.py 强制制造后抓包。\n"
+        "「协议帧」边界不是按预期画的，而是把各段字节拼成流后、用项目自己的 FrameParser 解出来的；"
+        "段边界来自抓包的 tcp.len。",
+        fontsize=8.0, color="#4b5563",
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=170, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+    return {
+        "segments": [s1 - s0 for s0, s1, _ in seg_bounds],
+        "frames": [(flen, ftype) for _, flen, ftype in frames],
+        "sticky": (s1 - s0, len(inside)),
+        "half": (flen, len(spanning), gap),
+    }
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="出 E7 的两张图（图 6-14 总览 / 图 6-15 字段标注）")
+    parser = argparse.ArgumentParser(description="出 E7 的三张图（6-14 总览 / 6-15 字段标注 / 6-16 粘包半包）")
     parser.add_argument("--pcap", type=Path, default=PROJECT_ROOT / "data" / "E7-capture.pcapng")
+    parser.add_argument("--split-pcap", type=Path, default=PROJECT_ROOT / "data" / "E7-split.pcapng",
+                        help="粘包/半包的专用抓包（图 6-16）")
+    parser.add_argument("--split-port", type=int, default=9601)
     parser.add_argument("--tshark", type=Path, default=DEFAULT_TSHARK)
     parser.add_argument("--out", type=Path,
                         default=PROJECT_ROOT / "docs" / "figures" / "fig6-15-frame-header.png")
@@ -415,6 +622,18 @@ def main() -> None:
     print(f"[e7] 已写出 {timeline_out}")
     for name, n in totals.items():
         print(f"[e7]   {name}: {n} 个")
+
+    # ---- 图 6-16：粘包 / 半包（独立抓包 + 独立端口）----
+    if args.split_pcap.exists():
+        split_out = args.out.with_name("fig6-16-sticky-half.png")
+        info2 = plot_split(args.split_pcap, args.tshark, args.split_port, split_out)
+        print(f"[e7] 已写出 {split_out}")
+        print(f"[e7]   TCP 段依次为: {info2['segments']}")
+        print(f"[e7]   解析出 {len(info2['frames'])} 个协议帧")
+        print(f"[e7]   粘包: {info2['sticky'][1]} 个帧装在同一个 {info2['sticky'][0]} B 的段里")
+        print(f"[e7]   半包: {info2['half'][0]} B 的帧横跨 {info2['half'][1]} 个段，间隔 {info2['half'][2]:.3f} s")
+    else:
+        print(f"[e7] 跳过图 6-16：{args.split_pcap} 不存在（先跑 tools.demo_e7_split 并抓包）")
 
 
 if __name__ == "__main__":

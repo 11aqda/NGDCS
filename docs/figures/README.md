@@ -1,4 +1,4 @@
-# 图表索引（docs/figures/）
+﻿# 图表索引（docs/figures/）
 
 > **命名约定：文件名里的编号 = 论文里的图号。**
 > 写论文时找「图 6-15」→ 直接看 `fig6-15-*.png`，不用记别的。
@@ -26,7 +26,7 @@
 | 图 6-13 | 三种快照策略带宽对比 | 柱状 | E6 | — | ⬜ 只做理论讨论 |
 | 图 6-14 | 抓包总览 | 事件时间线 | E7 | 🤖 `plot_e7` | ✅ `fig6-14-capture-overview.png` |
 | 图 6-15 | 快照报文逐字段标注 | 十六进制+表格 | E7 | 🤖 `plot_e7` | ✅ `fig6-15-frame-header.png` |
-| 图 6-16 | 粘包 / 半包解析对比 | 对比图 | E7 | 🤖 `plot_e7`（演示 pcap） | ⬜ 未做 |
+| 图 6-16 | 粘包 / 半包解析对比 | 两联生成图 | E7 | 🤖 `plot_e7`（读演示 pcap） | ✅ `fig6-16-sticky-half.png` |
 | 图 6-17 | 实体数 vs 单帧耗时（按阶段拆解） | 多线 | E9 | 🤖 `plot_e9` | ✅ `fig6-17-entities-vs-tick.png` |
 | 图 6-18 | 实体数 vs 带宽 | 折线 | E9 | 🤖 `plot_e9` | ✅ `fig6-18-entities-vs-bandwidth.png` |
 | 图 6-19 | 实体数 vs 单核占用 | 折线 | E9 | 🤖 `plot_e9` | ✅ `fig6-19-entities-vs-cpu.png` |
@@ -40,7 +40,7 @@
 |---|---|
 | 图 6-14 | `fig6-14-capture-overview.png` |
 | 图 6-15 | `fig6-15-frame-header.png` |
-| 图 6-16 | `fig6-16-sticky-half-packet.png`（生成图） |
+| 图 6-16 | `fig6-16-sticky-half.png`（生成图） |
 
 > **2026-10-27 变更**：图 6-14 / 6-15 原计划是 Wireshark 截图，实际改成了
 > **`tools/plot_e7.py` 从抓包文件生成**（`03 §6` 里标的"截图"类型因此变成"生成图"）。
