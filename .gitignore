@@ -14,7 +14,14 @@ debug.log
 # ---- 实验输出 ----
 bot_*.json
 metrics/
-data/
+# ⚠️ 这里必须写 `data/*` 而不是 `data/` —— 带斜杠会把整个目录排除，
+# 而 git **不允许**对被排除目录里的文件做 re-include（下面那两条例外会失效）
+data/*
+
+# 例外：E7 的两份抓包文件要进仓库 —— 图 6-14/6-15/6-16 全靠它们生成，
+# 没有 pcap 就无法复现（2.6 MB + 3.4 KB，可接受）
+!data/E7-capture.pcapng
+!data/E7-split.pcapng
 
 # ---- 工具缓存（matplotlib 字体缓存等）----
 .cache/
