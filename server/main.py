@@ -1,4 +1,4 @@
-﻿"""阶段 1 · 第 8 步（8a）：服务端 + 占位实体 + 指标落盘。
+"""阶段 1 · 第 8 步（8a）：服务端 + 占位实体 + 指标落盘。
 
 在 7b（输入 + 心跳 + 超时）之上补两件事：
 
@@ -96,6 +96,7 @@ class GameServer:
         metrics: MetricsRecorder | None = None,
         print_stats: bool = True,
         encoder: SnapshotEncoder | None = None,
+        fixed_entities: bool = False,
     ) -> None:
         self.clients: dict[int, Client] = {}
         self.next_id = 1
@@ -108,6 +109,12 @@ class GameServer:
         self.print_stats_enabled = print_stats
         # 默认标准二进制编码；E1 实验会换成 binary_fast / json（见 protocol/encoders.py）
         self.encoder = encoder if encoder is not None else get_encoder("binary")
+        # D-029：实验期实体数必须恒定。开关只管**校验**，不改行为 ——
+        # `World._respawn()` 本来每 tick 就把数量补回目标值（entities.py:146）。
+        # 之所以还要这个开关：将来击杀生效后会真的移除敌机，那时漏了补生就会
+        # 让快照悄悄变小、基线无声失效。开着它，漂移会当场抛错而不是录进 CSV。
+        self.fixed_entities = fixed_entities
+        self.entity_drift_reported = False
 
     # ---------------------------------------------------------------- 连接
 
@@ -300,6 +307,22 @@ class GameServer:
             stats=stats,
         )
 
+    def _verify_entity_counts(self) -> None:
+        """D-029 守卫：实体数与目标值必须一致，否则当场失败。
+
+        **为什么宁可抛错也不打日志**：数量漂移不会让程序崩溃，只会让快照变小、
+        `tick_ms` 变好看，然后录进 CSV —— 这种"数据悄悄地错了"最难事后发现。
+        抛错会让 `report_tick_crash` 大声报出来，实验直接停，不给错误数据机会。
+        """
+        expected = (self.world.enemy_target, self.world.bullet_target)
+        actual = (len(self.world.enemies), len(self.world.bullets))
+        if actual != expected:
+            raise RuntimeError(
+                f"实体数漂移（D-029 的 --fixed-entities 守卫）："
+                f"实际 {actual} != 目标 {expected}（敌机, 子弹）。"
+                f"补生逻辑没有维持住数量，本次数据不可用。"
+            )
+
     async def tick_loop(self) -> None:
         """固定 20 Hz：用 deadline 累加，避免 sleep 漂移。"""
         loop = asyncio.get_running_loop()
@@ -316,6 +339,8 @@ class GameServer:
             # ① 模拟：玩家按输入移动 + 实体移动 / 出屏剔除 / 补足数量
             self.update_players(started)
             self.world.step([(c.player_id, c.x) for c in self.clients.values()])
+            if self.fixed_entities:
+                self._verify_entity_counts()
             sim_done = time.perf_counter()
 
             # ② 碰撞判定：朴素 O(子弹×敌机)，**只判定不生效**（见 entities.py）
@@ -408,6 +433,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-stats", action="store_true", help="不打印每秒统计（照旧写 CSV）"
     )
+    parser.add_argument(
+        "--fixed-entities",
+        action="store_true",
+        help="实验用（D-029）：每 tick 校验实体数等于 --enemies/--bullets 的目标值，"
+        "漂移即报错停跑。E2/E8 等实验必须打开；正式游戏（击杀生效后）不要开",
+    )
     return parser.parse_args()
 
 
@@ -441,14 +472,16 @@ async def main(args: argparse.Namespace) -> None:
         metrics=metrics,
         print_stats=not args.no_stats,
         encoder=get_encoder(args.encoder),
+        fixed_entities=args.fixed_entities,
     )
 
     server = await asyncio.start_server(game.handle_client, HOST, args.port)
     timeout_text = f"{args.timeout:g}s" if args.timeout > 0 else "off"
+    fixed_text = "on(D-029)" if args.fixed_entities else "off"
     print(
         f"[server] listening on {HOST}:{args.port} (timeout {timeout_text}, "
         f"enemies {args.enemies}, bullets {args.bullets}, seed {args.seed}, "
-        f"encoder {args.encoder})"
+        f"encoder {args.encoder}, fixed_entities {fixed_text})"
     )
 
     tick_task = asyncio.create_task(game.tick_loop())

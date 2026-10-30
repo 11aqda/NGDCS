@@ -82,6 +82,9 @@ def summarize(
         "interval_p95_ms": round(percentile(intervals, 0.95) * 1000, 3),
         "rtt_p50_ms": round(percentile(rtts, 0.50) * 1000, 3),
         "rtt_p95_ms": round(percentile(rtts, 0.95) * 1000, 3),
+        # P99 供图 6-6（RTT 分位数曲线）：只看均值会掩盖尾部抖动，
+        # 而实时同步最怕的恰恰是尾部（卡一下在客户端就是"瞬移"）。
+        "rtt_p99_ms": round(percentile(rtts, 0.99) * 1000, 3),
         "errors": len(errors),
         "error_samples": errors[:5],
     }

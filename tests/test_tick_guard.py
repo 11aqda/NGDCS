@@ -172,6 +172,56 @@ class TickLoopSurvivalTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(window["net_ms"], 0.1)
 
 
+class FixedEntitiesGuardTest(unittest.TestCase):
+    """D-029 的 `--fixed-entities` 守卫。
+
+    这个守卫**当前永远不会触发**（`World._respawn()` 每 tick 都把数量补回目标值）。
+    它存在的意义是：将来击杀生效、敌机真的会被移除时，如果补生漏了，
+    **必须当场报错**，而不是让快照悄悄变小、把错误数据录进 CSV。
+    所以这里直接构造"数量不一致"的局面来验证它确实会拦。
+    """
+
+    def _make(self, fixed: bool, enemies: int = 4, bullets: int = 6) -> GameServer:
+        world = World(enemy_target=enemies, bullet_target=bullets, seed=1)
+        world.step([])  # 第一次 step 会把实体补到目标数
+        return GameServer(world=world, print_stats=False, fixed_entities=fixed)
+
+    def test_no_drift_passes(self):
+        """数量与目标一致时不抛错 —— 正常实验跑的就是这条路径。"""
+        game = self._make(fixed=True)
+        game._verify_entity_counts()  # 不抛异常即通过
+
+    def test_drift_raises(self):
+        """少一个敌机就必须抛错，且错误信息要指出"本次数据不可用"。"""
+        game = self._make(fixed=True)
+        game.world.enemies.pop()
+        with self.assertRaises(RuntimeError) as ctx:
+            game._verify_entity_counts()
+        self.assertIn("实体数漂移", str(ctx.exception))
+        self.assertIn("不可用", str(ctx.exception))
+
+    def test_extra_bullet_also_raises(self):
+        """多出来也必须拦 —— 漂移是双向的。"""
+        game = self._make(fixed=True)
+        game.world.bullets.append(game.world.bullets[0])
+        with self.assertRaises(RuntimeError):
+            game._verify_entity_counts()
+
+    def test_switch_off_means_no_check(self):
+        """没开开关时（正式游戏默认）即使数量漂移也不校验 —— 那是有意为之的行为。"""
+        game = self._make(fixed=False)
+        self.assertFalse(game.fixed_entities)
+        game.world.enemies.clear()  # 模拟"击杀生效后真的移除"
+        # 开关关着，就不应该有人来拦；真正的校验只在 tick 里按开关调用
+        self.assertEqual(len(game.world.enemies), 0)
+
+    def test_default_is_off(self):
+        """默认必须是关的：保持"正式游戏"语义，实验脚本负责显式打开（D-029）。"""
+        game = GameServer(world=World(enemy_target=1, bullet_target=1, seed=1),
+                          print_stats=False)
+        self.assertFalse(game.fixed_entities)
+
+
 class TickCrashReportTest(unittest.IsolatedAsyncioTestCase):
     async def test_cancelled_task_is_not_a_crash(self):
         task = asyncio.create_task(asyncio.sleep(30))

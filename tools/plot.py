@@ -718,6 +718,172 @@ def plot_e9(series: list[dict], out_dir: str | Path) -> list[Path]:
     return written
 
 
+E2_LEVEL_PATTERN = re.compile(r"^E2-c(\d+)$")
+
+
+def parse_e2_clients(level: str) -> int | None:
+    """`E2-c200` → 200；不是 E2 的档位返回 None。"""
+    match = E2_LEVEL_PATTERN.match(level)
+    return int(match.group(1)) if match else None
+
+
+def load_e2_rtt(run_dir: str | Path) -> dict[int, dict]:
+    """从机器人汇总里取 RTT 分位数，按连接数归档并对多轮取平均。
+
+    **RTT 不在服务端 CSV 里** ——它是客户端量出来的（心跳往返），
+    所以图 6-6 必须读 `data/runs/E2-c*-r*.json`。
+    """
+    import json
+
+    by_clients: dict[int, list[dict]] = defaultdict(list)
+    for path in sorted(Path(run_dir).glob("E2-c*-r*.json")):
+        match = re.match(r"E2-c(\d+)-r(\d+)$", path.stem)
+        if match is None:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        sample = {
+            "p50": data.get("rtt_p50_ms"),
+            "p95": data.get("rtt_p95_ms"),
+            "p99": data.get("rtt_p99_ms"),
+            "interval_p50": data.get("interval_p50_ms"),
+        }
+        if sample["p50"] is None:
+            continue
+        by_clients[int(match.group(1))].append(sample)
+
+    merged: dict[int, dict] = {}
+    for clients, samples in by_clients.items():
+        merged[clients] = {}
+        for key in ("p50", "p95", "p99", "interval_p50"):
+            values = [s[key] for s in samples if s.get(key) is not None]
+            # ⚠️ 不能直接 `_mean(values)`：它对空列表返回 0.0，
+            # 而"缺 p99"（2026-10-30 之前的旧数据）会因此被画成一条贴着 0 的假线
+            merged[clients][key] = _mean(values) if values else None
+        merged[clients]["runs"] = len(samples)
+    return merged
+
+
+def plot_e2(
+    series: list[dict], out_dir: str | Path, run_dir: str | Path = "data/runs"
+) -> list[Path]:
+    """出 E2 的三张图（图 6-4 / 6-5 / 6-6）：横轴是**连接数**。
+
+    与 E9 的关键区别：E9 横轴是实体数，E2 横轴是连接数，而实体是**固定**的
+    （D-029：4 玩家 + 30 敌机 + 200 子弹）。所以这三张图回答的是
+    「**广播的规模效应**」—— 每个 tick 要往 N 个连接各写一次快照，N 涨了会怎样。
+    """
+    if not HAVE_MPL:
+        raise RuntimeError("需要 matplotlib 才能出图：pip install matplotlib")
+
+    points: list[tuple[int, dict]] = []
+    for item in series:
+        clients = parse_e2_clients(item["level"])
+        if clients is None:
+            continue
+        points.append((clients, item))
+    if not points:
+        raise ValueError(
+            "没有可识别的 E2 数据（场景名需形如 E2-c10-r1）；"
+            "先用 tools/loadtest.py 跑一轮"
+        )
+    points.sort(key=lambda pair: pair[0])
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    xs = [c for c, _ in points]
+    tick = [p["tick_ms_avg"] for _, p in points]
+    cpu = [p["cpu_percent"] for _, p in points]
+    mem = [p["mem_mb"] for _, p in points]
+
+    # ---- 图 6-4：连接数 vs CPU / 内存（双轴）----
+    #
+    # 两个量放一张图是因为它们回答同一个问题：「连接数涨了，服务端还撑得住吗」。
+    # 但量纲不同（% vs MB），所以用左右双轴 —— **不要**为了塞进一张图而把内存换算成百分比，
+    # 那是把两个独立的物理量强行混为一谈。
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
+    ax.plot(xs, cpu, marker="o", color="tab:red", linewidth=1.8, label="CPU 单核占用")
+    ax.set_xlabel("并发连接数")
+    ax.set_ylabel("CPU 占用 (% of one core)", color="tab:red")
+    ax.tick_params(axis="y", labelcolor="tab:red")
+    ax.grid(alpha=0.3)
+
+    ax2 = ax.twinx()
+    ax2.plot(xs, mem, marker="s", color="tab:blue", linewidth=1.6,
+             linestyle="--", label="进程内存")
+    ax2.set_ylabel("进程内存 (MB)", color="tab:blue")
+    ax2.tick_params(axis="y", labelcolor="tab:blue")
+
+    ax.set_title("图 6-4 连接数 vs CPU / 内存")
+    lines = ax.get_lines() + ax2.get_lines()
+    ax.legend(lines, [ln.get_label() for ln in lines], fontsize=8, loc="upper left")
+    _annotate(ax, xs, cpu, [f"{c}" for c in xs])
+    path = out_dir / "fig6-04-clients-vs-cpu-mem.png"
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    written.append(path)
+
+    # ---- 图 6-5：连接数 vs tick 耗时 ----
+    fig, ax = plt.subplots(figsize=(7.5, 4.6))
+    p95 = [p["tick_ms_p95"] for _, p in points]
+    ax.plot(xs, tick, marker="o", color="black", linewidth=2, label="tick 均耗时")
+    ax.plot(xs, p95, marker="^", color="tab:orange", linewidth=1.4,
+            linestyle="--", label="tick p95")
+    ax.set_xlabel("并发连接数")
+    ax.set_ylabel("单帧耗时 (ms)")
+    ax.set_title("图 6-5 连接数 vs 单帧耗时")
+    ax.grid(alpha=0.3)
+    budget_in_view = max(max(tick), max(p95)) > TICK_BUDGET_MS * 0.2
+    if budget_in_view:
+        ax.axhline(TICK_BUDGET_MS, color="crimson", linestyle=":",
+                   linewidth=1, label=f"tick 预算 {TICK_BUDGET_MS:.0f} ms（20 Hz）")
+    ax.legend(fontsize=8)
+    _annotate(ax, xs, tick, [f"{c}" for c in xs])
+    path = out_dir / "fig6-05-clients-vs-tick.png"
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    written.append(path)
+    if not budget_in_view:
+        print(f"[plot] 图 6-5：实测最大 {max(max(tick), max(p95)):.2f} ms 远低于 "
+              f"{TICK_BUDGET_MS:g} ms 预算，预算线未画（会把曲线压成一条平线）")
+
+    # ---- 图 6-6：RTT 分位数 ----
+    rtt = load_e2_rtt(run_dir)
+    if rtt:
+        rx = sorted(rtt)
+        fig, ax = plt.subplots(figsize=(7.5, 4.6))
+        for key, label, color, marker in (
+            ("p50", "RTT P50", "tab:green", "o"),
+            ("p95", "RTT P95", "tab:orange", "s"),
+            ("p99", "RTT P99", "tab:red", "^"),
+        ):
+            ys = [rtt[c].get(key) for c in rx]
+            if all(v is None for v in ys):
+                continue
+            ax.plot(rx, [v if v is not None else float("nan") for v in ys],
+                    marker=marker, color=color, linewidth=1.5, label=label)
+        ax.set_xlabel("并发连接数")
+        ax.set_ylabel("心跳 RTT (ms)")
+        ax.set_title("图 6-6 RTT 分位数随连接数的变化")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+        path = out_dir / "fig6-06-clients-vs-rtt.png"
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+        written.append(path)
+    else:
+        print(f"[plot] 图 6-6 跳过：{run_dir} 里没有 E2 的机器人汇总（缺 RTT 数据）")
+
+    return written
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="出图：E9 四张（图 6-17~6-20）或 E1 三张（图 6-1~6-3）"
@@ -738,9 +904,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--figures",
         default="auto",
-        choices=("auto", "e9", "e1"),
+        choices=("auto", "e9", "e1", "e2"),
         help="出哪一套图。auto = 数据里带编码段就出 E1 的三张，"
-        "否则出 E9 的四张（E1/E9 数据同时存在时按 --scenario 过滤后再判断）",
+        "场景名是 E2-c* 就出 E2 的三张，否则出 E9 的四张"
+        "（E1/E9 数据同时存在时按 --scenario 过滤后再判断）",
+    )
+    parser.add_argument(
+        "--run-dir",
+        default="data/runs",
+        help="机器人汇总目录（图 6-6 的 RTT 只能从这里取）",
     )
     return parser.parse_args()
 
@@ -834,7 +1006,17 @@ def main() -> None:
 
     figure_set = args.figures
     if figure_set == "auto":
-        figure_set = "e1" if any(has_encoder_segment(k) for k in per_level_runs) else "e9"
+        if any(has_encoder_segment(k) for k in per_level_runs):
+            figure_set = "e1"
+        elif any(parse_e2_clients(k) is not None for k in per_level_runs):
+            figure_set = "e2"
+        else:
+            figure_set = "e9"
+
+    if figure_set == "e2":
+        for path in plot_e2(series, args.out, args.run_dir):
+            print(f"[plot] 已写出 {path}")
+        return
 
     if figure_set == "e1":
         by_encoder = e1_by_encoder(per_level_runs)
