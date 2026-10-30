@@ -206,8 +206,14 @@ def _f(row: dict, key: str) -> float | None:
         return None
 
 
-def analyze(rows: list[dict], summary: dict | None, clients: int) -> dict:
-    """判失败 + 归因。**先看服务端，再看机器人**。"""
+def analyze(rows: list[dict], summary: dict | None, clients: int,
+            server_crashed: bool = False) -> dict:
+    """判失败 + 归因。**先看服务端，再看机器人**。
+
+    `server_crashed` 必须传进来而不是事后补：tick loop 死掉之后不再写指标行，
+    剩下的数据是**被截断的样本**（平均值反而变小），所以"崩溃"这件事本身
+    就是最强的失败信号，绝不能只当成一条附注。
+    """
     verdict: dict = {
         "bad_run": 0,          # 连续超预算的最长连击
         "tick_p95_ms": None,
@@ -267,7 +273,9 @@ def analyze(rows: list[dict], summary: dict | None, clients: int) -> dict:
         verdict["reasons"].append("机器人没有写出汇总文件")
 
     # ---- 归因 ----
-    server_bad = any("服务端" in r for r in verdict["reasons"]) or verdict.get("server_crashed")
+    if server_crashed:
+        verdict["reasons"].insert(0, "服务端 tick loop 崩溃")
+    server_bad = server_crashed or any("服务端" in r for r in verdict["reasons"])
     bot_bad = any("机器人" in r or "客户端" in r for r in verdict["reasons"])
     verdict["blame"] = "both" if server_bad and bot_bad else (
         "server" if server_bad else ("bot" if bot_bad else "")
@@ -358,7 +366,7 @@ def run_one(args, clients: int, rep: int, sample_s: float,
     if result["server_crashed"]:
         result["error"] = result.get("error") or "服务端 tick loop 崩溃"
 
-    verdict = analyze(rows, summary, clients)
+    verdict = analyze(rows, summary, clients, server_crashed=result["server_crashed"])
     result.update(verdict)
     # `error` 只在失败路径才被赋值，所以这里统一用 get —— 否则成功那一轮会 KeyError
     error = result.get("error")

@@ -133,6 +133,24 @@ class AnalyzeTest(unittest.TestCase):
         self.assertTrue(result["reasons"])
         self.assertTrue(any("汇总文件" in r for r in result["reasons"]))
 
+    def test_server_crash_blames_server(self):
+        """tick loop 崩溃必须单独归因到服务端。
+
+        真踩过（E2 的 300 档）：第 257 个玩家连上时 `player_count` 溢出 uint8，
+        `build_snapshot` 抛 `ProtocolError`，tick loop 死掉。死之后不再写指标行，
+        于是平均值反而**变小**（2.5 ms，比 250 档的 5.3 ms 还低）——
+        如果只看数值会被骗成"更轻松了"。所以崩溃这件事必须压过一切数值判据。
+        """
+        result = analyze(self._good_rows(), self._good_summary(10), 10,
+                         server_crashed=True)
+        self.assertEqual(result["blame"], "server")
+        self.assertIn("服务端 tick loop 崩溃", result["reasons"])
+
+    def test_crash_plus_bad_bots_is_both(self):
+        result = analyze(self._good_rows(), {"clients_connected": 3, "errors": 1}, 10,
+                         server_crashed=True)
+        self.assertEqual(result["blame"], "both")
+
     def test_cpu_falls_back_to_cumulative_seconds(self):
         """低负载时逐行 cpu_percent 不可靠，要能用 cpu_seconds 首尾差重算。"""
         rows = [row(1.0, cpu=float("nan"), t_mono=0, cpu_seconds=5.0),

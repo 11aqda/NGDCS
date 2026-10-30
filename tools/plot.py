@@ -727,18 +727,26 @@ def parse_e2_clients(level: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def load_e2_rtt(run_dir: str | Path) -> dict[int, dict]:
+def load_e2_rtt(run_dir: str | Path, skip_clients: set[int] | None = None) -> dict[int, dict]:
     """从机器人汇总里取 RTT 分位数，按连接数归档并对多轮取平均。
 
     **RTT 不在服务端 CSV 里** ——它是客户端量出来的（心跳往返），
     所以图 6-6 必须读 `data/runs/E2-c*-r*.json`。
+
+    `skip_clients`：要排除的连接数。**必须传** —— 服务端崩过的档位
+    （如 E2-c300）仍有机器人汇总，但它的 RTT 是"服务器已经不广播了"的产物，
+    画上去会出现 P99 **反而下降**的假象。
     """
     import json
 
+    skip_clients = skip_clients or set()
     by_clients: dict[int, list[dict]] = defaultdict(list)
     for path in sorted(Path(run_dir).glob("E2-c*-r*.json")):
         match = re.match(r"E2-c(\d+)-r(\d+)$", path.stem)
         if match is None:
+            continue
+        clients = int(match.group(1))
+        if clients in skip_clients:
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -752,7 +760,7 @@ def load_e2_rtt(run_dir: str | Path) -> dict[int, dict]:
         }
         if sample["p50"] is None:
             continue
-        by_clients[int(match.group(1))].append(sample)
+        by_clients[clients].append(sample)
 
     merged: dict[int, dict] = {}
     for clients, samples in by_clients.items():
@@ -767,7 +775,8 @@ def load_e2_rtt(run_dir: str | Path) -> dict[int, dict]:
 
 
 def plot_e2(
-    series: list[dict], out_dir: str | Path, run_dir: str | Path = "data/runs"
+    series: list[dict], out_dir: str | Path, run_dir: str | Path = "data/runs",
+    skip_levels: tuple[str, ...] = (),
 ) -> list[Path]:
     """出 E2 的三张图（图 6-4 / 6-5 / 6-6）：横轴是**连接数**。
 
@@ -780,6 +789,10 @@ def plot_e2(
 
     points: list[tuple[int, dict]] = []
     for item in series:
+        if item["level"] in skip_levels:
+            # 服务端崩过的档位，指标行是被截断的样本：平均值反而变小，
+            # 画上去会让曲线在末端"突然变轻松"，是**最误导人**的形状
+            continue
         clients = parse_e2_clients(item["level"])
         if clients is None:
             continue
@@ -854,7 +867,9 @@ def plot_e2(
               f"{TICK_BUDGET_MS:g} ms 预算，预算线未画（会把曲线压成一条平线）")
 
     # ---- 图 6-6：RTT 分位数 ----
-    rtt = load_e2_rtt(run_dir)
+    skip_clients = {int(lv.split("-c")[-1]) for lv in skip_levels
+                    if parse_e2_clients(lv) is not None}
+    rtt = load_e2_rtt(run_dir, skip_clients=skip_clients)
     if rtt:
         rx = sorted(rtt)
         fig, ax = plt.subplots(figsize=(7.5, 4.6))
@@ -913,6 +928,12 @@ def parse_args() -> argparse.Namespace:
         "--run-dir",
         default="data/runs",
         help="机器人汇总目录（图 6-6 的 RTT 只能从这里取）",
+    )
+    parser.add_argument(
+        "--skip-levels",
+        default="",
+        help="逗号分隔的档位名，出图时排除（如 E2-c300 —— 服务端崩过的档，"
+             "指标行被截断，画上去会让曲线末端假性变低）",
     )
     return parser.parse_args()
 
@@ -1014,7 +1035,10 @@ def main() -> None:
             figure_set = "e9"
 
     if figure_set == "e2":
-        for path in plot_e2(series, args.out, args.run_dir):
+        skip = tuple(x.strip() for x in args.skip_levels.split(",") if x.strip())
+        if skip:
+            print(f"[plot] 排除档位：{', '.join(skip)}")
+        for path in plot_e2(series, args.out, args.run_dir, skip_levels=skip):
             print(f"[plot] 已写出 {path}")
         return
 
