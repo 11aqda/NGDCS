@@ -1,4 +1,4 @@
-"""E2 出图（图 6-4 / 6-5 / 6-6）的测试。
+﻿"""E2 出图（图 6-4 / 6-5 / 6-6）的测试。
 
 重点不是"图好看不好看"，而是三件容易错的事：
 
@@ -15,6 +15,7 @@ from pathlib import Path
 
 from tools.plot import (
     HAVE_MPL,
+    e2_actual_clients,
     load_e2_rtt,
     parse_e2_clients,
     plot_e2,
@@ -52,6 +53,24 @@ class ParseClientsTest(unittest.TestCase):
 
     def test_zero_is_allowed(self):
         self.assertEqual(parse_e2_clients("E2-c0"), 0)
+
+
+class ActualClientsTest(unittest.TestCase):
+    """横轴必须用**实测在线数**，不能用请求值。
+
+    真踩过：请求 250 个机器人，受 GIL 限制只有 238 个在线（心跳超时被踢）。
+    如果横轴写 250，这个点就站在它没达到的位置上，斜率也是错的。
+    """
+
+    def test_prefers_measured_players(self):
+        self.assertEqual(e2_actual_clients({"players": 238}, 250), 238.0)
+
+    def test_falls_back_to_requested(self):
+        self.assertEqual(e2_actual_clients({"players": 0}, 250), 250.0)
+        self.assertEqual(e2_actual_clients({}, 100), 100.0)
+
+    def test_falls_back_on_missing_key(self):
+        self.assertEqual(e2_actual_clients({"players": None}, 50), 50.0)
 
 
 class LoadRttTest(unittest.TestCase):

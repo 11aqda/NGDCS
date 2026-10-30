@@ -727,6 +727,23 @@ def parse_e2_clients(level: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def e2_actual_clients(item: dict, requested: int) -> float:
+    """横轴用**实测在线数**，不是请求的连接数。
+
+    为什么必须这样（2026-10-30 踩到）：机器人全跑在一个 Python 进程里，受 GIL 限制，
+    250 个 asyncio 客户端心跳会延迟，超过服务端 15 s 超时就被踢掉 ——
+    请求 250 实际只有 238 在线。
+
+    如果用请求值当横轴，图上的点会**站在一个它并没有达到的位置**上，
+    和其他档位比较时斜率也是错的。宁可横轴出现 238 这种"不圆整"的数，
+    也不能拿没达到的并发数去标定性能。
+    """
+    actual = item.get("players")
+    if actual is None or actual <= 0:
+        return float(requested)
+    return float(actual)
+
+
 def load_e2_rtt(run_dir: str | Path, skip_clients: set[int] | None = None) -> dict[int, dict]:
     """从机器人汇总里取 RTT 分位数，按连接数归档并对多轮取平均。
 
@@ -787,31 +804,32 @@ def plot_e2(
     if not HAVE_MPL:
         raise RuntimeError("需要 matplotlib 才能出图：pip install matplotlib")
 
-    points: list[tuple[int, dict]] = []
+    points: list[tuple[float, int, dict]] = []
     for item in series:
         if item["level"] in skip_levels:
             # 服务端崩过的档位，指标行是被截断的样本：平均值反而变小，
             # 画上去会让曲线在末端"突然变轻松"，是**最误导人**的形状
             continue
-        clients = parse_e2_clients(item["level"])
-        if clients is None:
+        requested = parse_e2_clients(item["level"])
+        if requested is None:
             continue
-        points.append((clients, item))
+        points.append((e2_actual_clients(item, requested), requested, item))
     if not points:
         raise ValueError(
             "没有可识别的 E2 数据（场景名需形如 E2-c10-r1）；"
             "先用 tools/loadtest.py 跑一轮"
         )
-    points.sort(key=lambda pair: pair[0])
+    points.sort(key=lambda triple: triple[0])
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
 
-    xs = [c for c, _ in points]
-    tick = [p["tick_ms_avg"] for _, p in points]
-    cpu = [p["cpu_percent"] for _, p in points]
-    mem = [p["mem_mb"] for _, p in points]
+    xs = [actual for actual, _, _ in points]
+    tick = [p["tick_ms_avg"] for _, _, p in points]
+    cpu = [p["cpu_percent"] for _, _, p in points]
+    mem = [p["mem_mb"] for _, _, p in points]
+    x_label = "并发连接数（实测在线）"
 
     # ---- 图 6-4：连接数 vs CPU / 内存（双轴）----
     #
@@ -820,7 +838,7 @@ def plot_e2(
     # 那是把两个独立的物理量强行混为一谈。
     fig, ax = plt.subplots(figsize=(7.5, 4.8))
     ax.plot(xs, cpu, marker="o", color="tab:red", linewidth=1.8, label="CPU 单核占用")
-    ax.set_xlabel("并发连接数")
+    ax.set_xlabel(x_label)
     ax.set_ylabel("CPU 占用 (% of one core)", color="tab:red")
     ax.tick_params(axis="y", labelcolor="tab:red")
     ax.grid(alpha=0.3)
@@ -834,7 +852,7 @@ def plot_e2(
     ax.set_title("图 6-4 连接数 vs CPU / 内存")
     lines = ax.get_lines() + ax2.get_lines()
     ax.legend(lines, [ln.get_label() for ln in lines], fontsize=8, loc="upper left")
-    _annotate(ax, xs, cpu, [f"{c}" for c in xs])
+    _annotate(ax, xs, cpu, [f"{x:.0f}" for x in xs])
     path = out_dir / "fig6-04-clients-vs-cpu-mem.png"
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -843,11 +861,11 @@ def plot_e2(
 
     # ---- 图 6-5：连接数 vs tick 耗时 ----
     fig, ax = plt.subplots(figsize=(7.5, 4.6))
-    p95 = [p["tick_ms_p95"] for _, p in points]
+    p95 = [p["tick_ms_p95"] for _, _, p in points]
     ax.plot(xs, tick, marker="o", color="black", linewidth=2, label="tick 均耗时")
     ax.plot(xs, p95, marker="^", color="tab:orange", linewidth=1.4,
             linestyle="--", label="tick p95")
-    ax.set_xlabel("并发连接数")
+    ax.set_xlabel(x_label)
     ax.set_ylabel("单帧耗时 (ms)")
     ax.set_title("图 6-5 连接数 vs 单帧耗时")
     ax.grid(alpha=0.3)
@@ -856,7 +874,7 @@ def plot_e2(
         ax.axhline(TICK_BUDGET_MS, color="crimson", linestyle=":",
                    linewidth=1, label=f"tick 预算 {TICK_BUDGET_MS:.0f} ms（20 Hz）")
     ax.legend(fontsize=8)
-    _annotate(ax, xs, tick, [f"{c}" for c in xs])
+    _annotate(ax, xs, tick, [f"{x:.0f}" for x in xs])
     path = out_dir / "fig6-05-clients-vs-tick.png"
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -871,7 +889,12 @@ def plot_e2(
                     if parse_e2_clients(lv) is not None}
     rtt = load_e2_rtt(run_dir, skip_clients=skip_clients)
     if rtt:
+        # RTT 汇总按**请求的连接数**归档（文件名里只有请求值），
+        # 但横轴必须换成**实测在线数** —— 与图 6-4/6-5 保持一致，
+        # 否则同一档在两张图上会站在不同的 x 位置，读者会以为数据打架
+        to_actual = {requested: actual for actual, requested, _ in points}
         rx = sorted(rtt)
+        rxs = [to_actual.get(c, float(c)) for c in rx]
         fig, ax = plt.subplots(figsize=(7.5, 4.6))
         for key, label, color, marker in (
             ("p50", "RTT P50", "tab:green", "o"),
@@ -881,9 +904,9 @@ def plot_e2(
             ys = [rtt[c].get(key) for c in rx]
             if all(v is None for v in ys):
                 continue
-            ax.plot(rx, [v if v is not None else float("nan") for v in ys],
+            ax.plot(rxs, [v if v is not None else float("nan") for v in ys],
                     marker=marker, color=color, linewidth=1.5, label=label)
-        ax.set_xlabel("并发连接数")
+        ax.set_xlabel(x_label)
         ax.set_ylabel("心跳 RTT (ms)")
         ax.set_title("图 6-6 RTT 分位数随连接数的变化")
         ax.grid(alpha=0.3)
