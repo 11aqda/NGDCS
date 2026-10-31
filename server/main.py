@@ -115,6 +115,7 @@ class GameServer:
         # 让快照悄悄变小、基线无声失效。开着它，漂移会当场抛错而不是录进 CSV。
         self.fixed_entities = fixed_entities
         self.entity_drift_reported = False
+        self._kills_total = 0
 
     # ---------------------------------------------------------------- 连接
 
@@ -230,7 +231,7 @@ class GameServer:
                 power=1,
                 color=client.color,
                 flags=1,
-                score=0,
+                score=self.world.scores.get(client.player_id, 0),
             )
             for client in sorted(self.clients.values(), key=lambda c: c.player_id)
         ]
@@ -338,13 +339,25 @@ class GameServer:
 
             # ① 模拟：玩家按输入移动 + 实体移动 / 出屏剔除 / 补足数量
             self.update_players(started)
-            self.world.step([(c.player_id, c.x) for c in self.clients.values()])
+            players = [(c.player_id, c.x) for c in self.clients.values()]
+            self.world.step(players)
             if self.fixed_entities:
                 self._verify_entity_counts()
             sim_done = time.perf_counter()
 
-            # ② 碰撞判定：朴素 O(子弹×敌机)，**只判定不生效**（见 entities.py）
-            hits = detect_collisions(self.world.bullets, self.world.enemies)
+            # ② 碰撞判定：朴素 O(子弹×敌机)
+            #    - 默认（--enable-kills 关）：**只判定不生效**，只数命中数（E9/E1/E2 基线）
+            #    - 打开后：扣血 / 死亡 / 计分 / 消耗子弹，走 World.resolve_kills()
+            if self.world.enable_kills:
+                hits, killed = self.world.resolve_kills(players)
+                self._kills_total += killed
+                if self.fixed_entities:
+                    # **必须在这里再查一次**：击杀发生在上面那次检查之后。
+                    # 只在 step() 后查，守卫会漏掉"击杀后没补生"——而它恰恰会让
+                    # 快照字节数浮动，静默毁掉 E9 那套「逐字节等于公式」的校验。
+                    self._verify_entity_counts()
+            else:
+                hits = detect_collisions(self.world.bullets, self.world.enemies)
             collision_done = time.perf_counter()
 
             # ③ 序列化：把几百个实体逐个 struct.pack（没人连就不做）
@@ -439,13 +452,21 @@ def parse_args() -> argparse.Namespace:
         help="实验用（D-029）：每 tick 校验实体数等于 --enemies/--bullets 的目标值，"
         "漂移即报错停跑。E2/E8 等实验必须打开；正式游戏（击杀生效后）不要开",
     )
+    parser.add_argument(
+        "--enable-kills",
+        action="store_true",
+        help="让击杀**真的生效**：扣血 / 死亡 / 计分 / 消耗子弹（游戏内容用）。"
+        "默认关 —— E9/E1/E2 的基线都是在「只判定不生效」下测的，"
+        "打开会改变 collision 阶段的实际工作量，只有在做游戏演示/计分时才开",
+    )
     return parser.parse_args()
 
 
 async def main(args: argparse.Namespace) -> None:
     try:
         world = World(
-            enemy_target=args.enemies, bullet_target=args.bullets, seed=args.seed
+            enemy_target=args.enemies, bullet_target=args.bullets, seed=args.seed,
+            enable_kills=args.enable_kills, fixed_entities=args.fixed_entities,
         )
     except ValueError as exc:
         print(f"[server] 参数错误：{exc}")
@@ -478,10 +499,11 @@ async def main(args: argparse.Namespace) -> None:
     server = await asyncio.start_server(game.handle_client, HOST, args.port)
     timeout_text = f"{args.timeout:g}s" if args.timeout > 0 else "off"
     fixed_text = "on(D-029)" if args.fixed_entities else "off"
+    kills_text = "on" if args.enable_kills else "off"
     print(
         f"[server] listening on {HOST}:{args.port} (timeout {timeout_text}, "
         f"enemies {args.enemies}, bullets {args.bullets}, seed {args.seed}, "
-        f"encoder {args.encoder}, fixed_entities {fixed_text})"
+        f"encoder {args.encoder}, fixed_entities {fixed_text}, kills {kills_text})"
     )
 
     tick_task = asyncio.create_task(game.tick_loop())

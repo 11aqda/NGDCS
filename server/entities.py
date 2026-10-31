@@ -99,7 +99,12 @@ class World:
     """
 
     def __init__(
-        self, enemy_target: int = 0, bullet_target: int = 0, seed: int = 1
+        self,
+        enemy_target: int = 0,
+        bullet_target: int = 0,
+        seed: int = 1,
+        enable_kills: bool = False,
+        fixed_entities: bool = False,
     ) -> None:
         # 上限来自协议本身：enemy_count 是 uint8、bullet_count 是 uint16
         if not 0 <= enemy_target <= 0xFF:
@@ -110,6 +115,19 @@ class World:
         self.enemy_target = enemy_target
         self.bullet_target = bullet_target
         self.rng = random.Random(seed)
+
+        # 击杀是否**真的生效**（扣血 / 死亡 / 计分）。
+        # 默认关：E9/E1/E2 的全部基线都是在「只判定不生效」下测的，
+        # 打开会改变 collision 阶段的实际工作量，必须显式开启才不污染复现。
+        self.enable_kills = enable_kills
+        # 击杀后是否**立刻补满**（实验期需要数量恒定，见 D-029）
+        self.fixed_entities = fixed_entities
+        self.scores: dict[int, int] = {}
+        self.kills = 0
+        self.score_per_kill = 10
+        # 非固定模式下每 tick 最多补几个 —— 否则击杀刚清掉的敌机下一 tick 就满了，
+        # 玩家看不到"打掉了"的反馈
+        self.respawn_per_tick = 2
 
         self.enemies: list[Enemy] = []
         self.bullets: list[Bullet] = []
@@ -143,8 +161,17 @@ class World:
         self.bullets = alive
 
     def _respawn(self, players: list[tuple[int, int]]) -> None:
+        # 击杀生效且**不要求**实体恒定时，按速率补生：一次杀光会让场上空掉，
+        # 这正是"打掉了"的反馈；而实验期（fixed_entities）必须立刻补满，
+        # 因为自变量是同屏实体数（D-029）。
+        capped = self.enable_kills and not self.fixed_entities
+        spawned = 0
         while len(self.enemies) < self.enemy_target:
+            if capped and spawned >= self.respawn_per_tick:
+                break
             self.enemies.append(self._spawn_enemy())
+            spawned += 1
+        # 子弹不设上限：它是"发射物"，不是关卡难度，补慢了反而让弹幕变稀
         while len(self.bullets) < self.bullet_target:
             self.bullets.append(self._spawn_bullet(players))
 
@@ -196,6 +223,73 @@ class World:
 
     def counts(self) -> tuple[int, int]:
         return len(self.enemies), len(self.bullets)
+
+    # ------------------------------------------------------------ 击杀结算
+
+    def resolve_kills(self, players: list[tuple[int, int]] | None = None) -> tuple[int, int]:
+        """让碰撞**真的生效**：扣血 → 死亡 → 计分 → 消耗子弹。返回 (命中数, 击杀数)。
+
+        **为什么单独写一份，不复用 `detect_collisions`**：
+        `detect_collisions` 是为 E9 基线量过常数因子的**只计数**循环，
+        它跑出来的 `collision_ms` 是所有 E9/E1/E2 数据的一部分。往它里面塞伤害结算，
+        等于偷偷改了历史数据的实验条件 —— 而这批数据的价值恰恰在于"同一条代码路径"。
+
+        所以两条路径分开：**计数路径保持一字不动**，结算路径只在 `--enable-kills` 时走。
+        代价是两份相似的循环（约 25 行重复），换来的是基线可比。
+
+        与计数版的差异（也都会体现在 `collision_ms` 上，需在实验记录里注明）：
+          - 命中后要改 `hp`、判死亡、写 `scores`、标记子弹消耗 —— 有写操作
+          - 需要**反向下标删除**，所以先收集索引再统一删，避免边遍历边删
+
+        计分口径：一次击杀 `score_per_kill` 分，归**子弹的主人**（`owner_id`）。
+        敌方子弹 `owner_id == 0`，不会命中敌机（它朝下飞），即使命中也不给分。
+        """
+        radius = COLLISION_RADIUS
+        hits = 0
+        killed = 0
+        dead_enemies: set[int] = set()
+        used_bullets: set[int] = set()
+
+        for bi, bullet in enumerate(self.bullets):
+            if bullet.owner_id == 0:
+                continue  # 敌方子弹不参与"打敌机"
+            bx = bullet.x
+            by = bullet.y
+            for ei, enemy in enumerate(self.enemies):
+                if ei in dead_enemies:
+                    continue
+                dx = bx - enemy.x
+                if -radius <= dx <= radius:
+                    dy = by - enemy.y
+                    if -radius <= dy <= radius:
+                        hits += 1
+                        used_bullets.add(bi)
+                        enemy.hp -= 1
+                        if enemy.hp <= 0:
+                            dead_enemies.add(ei)
+                            killed += 1
+                            self._award(bullet.owner_id)
+                        break  # 一颗子弹只命中一个目标
+
+        if dead_enemies:
+            self.enemies = [e for i, e in enumerate(self.enemies) if i not in dead_enemies]
+        if used_bullets:
+            self.bullets = [b for i, b in enumerate(self.bullets) if i not in used_bullets]
+        self.kills += killed
+
+        # ⚠️ 实验期必须**当场**补回目标数，不能等下一个 tick 的 `_respawn()`。
+        # 2026-10-31 实测踩到：`--fixed-entities` 的守卫在 `step()` 之后检查，
+        # 那时已经补满了，所以守卫通过；而击杀发生在它**之后**，
+        # 于是快照里的敌机数变成 27~30 —— **守卫形同虚设，数据已经不符契约**。
+        # 快照字节数是 E9 那套「逐字节等于公式」校验的基础，一旦浮动就全废。
+        if self.fixed_entities and killed:
+            self._respawn(players or [])
+        return hits, killed
+
+    def _award(self, player_id: int) -> None:
+        """加分。**必须夹到 uint16 上限**：`score` 是协议里的 uint16 字段，
+        越界会让 `struct.pack` 抛错 —— 那会像 E2 的 257 玩家一样直接搞死 tick 循环。"""
+        self.scores[player_id] = min(0xFFFF, self.scores.get(player_id, 0) + self.score_per_kill)
 
 
 def detect_collisions(bullets: list[Bullet], enemies: list[Enemy]) -> int:
