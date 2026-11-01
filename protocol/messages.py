@@ -30,6 +30,29 @@ C_INPUT = 0x06
 C_HEARTBEAT = 0x07
 S_HEARTBEAT_ACK = 0x87
 
+# ---- 认证（02 §5.1 / §5.2，第 10 步实现）----
+# 这是「长短连接分层」唯一的衔接点（D-005）：
+# 客户端先走 HTTP 登录拿到 token，再在 **TCP 连接**上用它认证。
+C_AUTH = 0x01
+S_AUTH_OK = 0x81
+S_AUTH_FAIL = 0x82
+
+# 失败码（02 §5.4）
+ERR_AUTH_FAILED = 0x01
+
+# C_AUTH 载荷：version uint8 + token（变长 ASCII，1~64 字节）
+#   token 是 HTTP 登录返回的 64 位十六进制串。用变长而不是定长，
+#   是为了将来缩短/换格式时不用改协议版本。
+AUTH_HEADER = struct.Struct("!B")
+TOKEN_MIN, TOKEN_MAX = 1, 64
+
+# S_AUTH_OK 载荷：player_id uint16 + nickname_len uint8 + nickname（UTF-8，1~20 字节）
+AUTH_OK_HEADER = struct.Struct("!HB")
+NICKNAME_MIN, NICKNAME_MAX = 1, 20
+
+# S_AUTH_FAIL 载荷：code uint8
+AUTH_FAIL = struct.Struct("!B")
+
 # S_WELCOME 载荷：player_id uint16 + color uint8
 WELCOME = struct.Struct("!HB")
 
@@ -117,6 +140,76 @@ def pack_heartbeat(client_time: int) -> bytes:
     if not 0 <= client_time <= _TIME_MASK:
         raise ProtocolError(f"client_time 超出 uint32：{client_time}")
     return HEARTBEAT.pack(client_time)
+
+
+# ---------------------------------------------------------------- 认证
+
+
+def pack_auth(token: str, version: int = 1) -> bytes:
+    """打包 `C_AUTH`：version uint8 + token 变长 ASCII。
+
+    非 ASCII 一律转成 `ProtocolError`（而不是让 `UnicodeEncodeError` 冒出去）——
+    调用方只需要处理一种异常，且"token 必须是十六进制串"这个约束在协议层就挡住了。
+    """
+    try:
+        raw = token.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ProtocolError(f"token 必须是 ASCII：{exc}") from exc
+    if not TOKEN_MIN <= len(raw) <= TOKEN_MAX:
+        raise ProtocolError(f"token 长度需为 {TOKEN_MIN}~{TOKEN_MAX} 字节：{len(raw)}")
+    if not 0 <= version <= 0xFF:
+        raise ProtocolError(f"version 超出 uint8：{version}")
+    return AUTH_HEADER.pack(version) + raw
+
+
+def unpack_auth(payload: bytes) -> tuple[int, str]:
+    """解析 `C_AUTH`，返回 (version, token)。
+
+    **长度不合法一律抛 ProtocolError**（而不是返回空串）——
+    调用方据此回 `S_AUTH_FAIL`，也不会把畸形数据当成"匿名登录"。
+    """
+    if len(payload) < AUTH_HEADER.size + TOKEN_MIN:
+        raise ProtocolError(f"C_AUTH 载荷过短：{len(payload)} 字节")
+    version = AUTH_HEADER.unpack(payload[: AUTH_HEADER.size])[0]
+    raw = payload[AUTH_HEADER.size :]
+    if len(raw) > TOKEN_MAX:
+        raise ProtocolError(f"token 超长：{len(raw)} > {TOKEN_MAX}")
+    try:
+        token = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ProtocolError(f"token 不是 ASCII：{exc}") from exc
+    return version, token
+
+
+def pack_auth_ok(player_id: int, nickname: str) -> bytes:
+    """打包 `S_AUTH_OK`：player_id uint16 + nickname_len uint8 + nickname。"""
+    raw = nickname.encode("utf-8")
+    if not NICKNAME_MIN <= len(raw) <= NICKNAME_MAX:
+        raise ProtocolError(f"nickname 长度需为 {NICKNAME_MIN}~{NICKNAME_MAX} 字节")
+    if not 0 <= player_id <= 0xFFFF:
+        raise ProtocolError(f"player_id 超出 uint16：{player_id}")
+    return AUTH_OK_HEADER.pack(player_id, len(raw)) + raw
+
+
+def unpack_auth_ok(payload: bytes) -> tuple[int, str]:
+    if len(payload) < AUTH_OK_HEADER.size:
+        raise ProtocolError(f"S_AUTH_OK 载荷过短：{len(payload)} 字节")
+    player_id, length = AUTH_OK_HEADER.unpack(payload[: AUTH_OK_HEADER.size])
+    raw = payload[AUTH_OK_HEADER.size :]
+    if len(raw) != length:
+        raise ProtocolError(f"nickname 长度不符：声明 {length}，实际 {len(raw)}")
+    return player_id, raw.decode("utf-8", errors="replace")
+
+
+def pack_auth_fail(code: int = ERR_AUTH_FAILED) -> bytes:
+    if not 0 <= code <= 0xFF:
+        raise ProtocolError(f"code 超出 uint8：{code}")
+    return AUTH_FAIL.pack(code)
+
+
+def unpack_auth_fail(payload: bytes) -> int:
+    _require_size(payload, AUTH_FAIL, "S_AUTH_FAIL")
+    return AUTH_FAIL.unpack(payload)[0]
 
 
 def unpack_heartbeat(payload: bytes) -> int:

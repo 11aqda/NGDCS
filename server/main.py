@@ -39,7 +39,13 @@ from protocol.framing import (
 from protocol.messages import (
     C_HEARTBEAT,
     C_INPUT,
+    C_AUTH,
     S_HEARTBEAT_ACK,
+    S_AUTH_OK,
+    S_AUTH_FAIL,
+    pack_auth_ok,
+    pack_auth_fail,
+    unpack_auth,
     S_SNAPSHOT,
     S_WELCOME,
     WELCOME,
@@ -51,6 +57,7 @@ from protocol.messages import (
 from protocol.snapshot import PlayerSnapshot
 from protocol.encoders import ENCODER_NAMES, SnapshotEncoder, get_encoder
 from server.entities import World, detect_collisions
+from server.persistence import authenticate_token, persist_score
 from server.metrics import MetricsRecorder, write_scenario
 from server.movement import apply_input
 from server.stats import TickStats
@@ -84,6 +91,9 @@ class Client:
     keys: int = 0
     last_input_at: float = field(default_factory=time.perf_counter)
     last_recv_at: float = field(default_factory=time.perf_counter)
+    # 认证信息（步骤 10b）：None = 匿名玩家，不参与排行榜
+    user_id: int | None = None
+    nickname: str = ""
 
 
 class GameServer:
@@ -97,6 +107,7 @@ class GameServer:
         print_stats: bool = True,
         encoder: SnapshotEncoder | None = None,
         fixed_entities: bool = False,
+        persist_scores: bool = False,
     ) -> None:
         self.clients: dict[int, Client] = {}
         self.next_id = 1
@@ -116,6 +127,8 @@ class GameServer:
         self.fixed_entities = fixed_entities
         self.entity_drift_reported = False
         self._kills_total = 0
+        # 步骤 10b：结算写库。**默认关** —— 实验期绝不能因为连库改变基线
+        self.persist_scores = persist_scores
 
     # ---------------------------------------------------------------- 连接
 
@@ -166,6 +179,25 @@ class GameServer:
                 await writer.wait_closed()
             except (ConnectionError, RuntimeError):
                 pass
+
+            # 步骤 10b：**结算**。目前"一局"= 一次连接（游戏还没做结束条件，
+            # 见步骤 11 的关卡/BOSS），所以在这里把本局分数写库。
+            # 只有「开了持久化 + 已认证 + 确实有分」才写 —— 匿名机器人永远不写。
+            if self.persist_scores and client.user_id is not None:
+                score = self.world.scores.get(player_id, 0)
+                if score > 0:
+                    ok = await persist_score(
+                        client.user_id, score,
+                        level=1, kills=self.world.kills,
+                    )
+                    print(
+                        f"[server] player {player_id} 结算 "
+                        f"user_id={client.user_id} score={score} "
+                        f"{'已入库' if ok else '入库失败（不影响对局）'}"
+                    )
+                else:
+                    print(f"[server] player {player_id} 无得分，跳过结算")
+
             print(f"[server] player {player_id} left")
 
     async def dispatch(self, client: Client, frame: Frame) -> None:
@@ -178,6 +210,37 @@ class GameServer:
             # 只记「按了什么」，不记坐标 —— 服务端权威（D-006）
             client.keys = unpack_keys(frame.payload)
             client.last_input_at = time.perf_counter()
+
+        elif frame.msg_type == C_AUTH:
+            # 步骤 10b：用 HTTP 登录拿到的 token 在 **TCP 连接**上认证。
+            # 这是长短连接分层唯一的衔接点（D-005）。
+            try:
+                _version, token = unpack_auth(frame.payload)
+            except ProtocolError as exc:
+                print(f"[server] 认证载荷非法：{exc}")
+                await send_frame_async(
+                    client.writer, S_AUTH_FAIL, frame.seq, pack_auth_fail()
+                )
+                return
+
+            # 查询走线程池（Django ORM 同步阻塞，压在 tick 里会掉帧）
+            identity = await authenticate_token(token)
+            if identity is None:
+                print(f"[server] player {client.player_id} 认证失败（token 无效）")
+                await send_frame_async(
+                    client.writer, S_AUTH_FAIL, frame.seq, pack_auth_fail()
+                )
+                return
+
+            client.user_id, client.nickname = identity
+            print(
+                f"[server] player {client.player_id} 认证通过 → "
+                f"user_id={client.user_id} ({client.nickname})"
+            )
+            await send_frame_async(
+                client.writer, S_AUTH_OK, frame.seq,
+                pack_auth_ok(client.player_id, client.nickname),
+            )
 
         elif frame.msg_type == C_HEARTBEAT:
             client_time = unpack_heartbeat(frame.payload)
@@ -453,6 +516,12 @@ def parse_args() -> argparse.Namespace:
         "漂移即报错停跑。E2/E8 等实验必须打开；正式游戏（击杀生效后）不要开",
     )
     parser.add_argument(
+        "--persist-scores",
+        action="store_true",
+        help="步骤 10b：结算时把成绩写入 MySQL+Redis（需已认证的玩家）。"
+        "默认关 —— 实验期绝不能因为连库改变基线",
+    )
+    parser.add_argument(
         "--enable-kills",
         action="store_true",
         help="让击杀**真的生效**：扣血 / 死亡 / 计分 / 消耗子弹（游戏内容用）。"
@@ -494,16 +563,18 @@ async def main(args: argparse.Namespace) -> None:
         print_stats=not args.no_stats,
         encoder=get_encoder(args.encoder),
         fixed_entities=args.fixed_entities,
+        persist_scores=args.persist_scores,
     )
 
     server = await asyncio.start_server(game.handle_client, HOST, args.port)
     timeout_text = f"{args.timeout:g}s" if args.timeout > 0 else "off"
     fixed_text = "on(D-029)" if args.fixed_entities else "off"
     kills_text = "on" if args.enable_kills else "off"
+    persist_text = "on" if args.persist_scores else "off"
     print(
         f"[server] listening on {HOST}:{args.port} (timeout {timeout_text}, "
         f"enemies {args.enemies}, bullets {args.bullets}, seed {args.seed}, "
-        f"encoder {args.encoder}, fixed_entities {fixed_text}, kills {kills_text})"
+        f"encoder {args.encoder}, fixed_entities {fixed_text}, kills {kills_text}, persist {persist_text})"
     )
 
     tick_task = asyncio.create_task(game.tick_loop())
