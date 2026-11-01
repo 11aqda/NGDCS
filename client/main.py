@@ -61,21 +61,34 @@ GRID = (30, 36, 52)
 TEXT = (220, 226, 240)
 WHITE = (255, 255, 255)
 RED = (255, 120, 120)
-ENEMY_COLOR = (240, 96, 96)
-# 分数用金色，和玩家/敌机的颜色区分开（HUD 里它是唯一的"成绩"数字）
-SCORE_COLOR = (255, 214, 102)
-PLAYER_BULLET_COLOR = (140, 240, 255)
-ENEMY_BULLET_COLOR = (255, 176, 64)
 
+# ---------------------------------------------------------------- 颜色语义
+# **整屏乱不乱，就靠这一条规则**：
+#     冷色（青 / 蓝 / 绿） = 我方
+#     暖色（红 / 橙）      = 敌方
+#     金色                 = 分数（全屏唯一的中性强调色）
+#
+# 2026-11-01 之前是反着来的：我方子弹浅青、敌方子弹橙黄，而分数也是暖金色，
+# 屏幕上到处是亮点，**分不清谁打谁**。定下这条规则后，颜色本身就带语义，
+# 不需要看清形状也知道该躲什么。
+ENEMY_BODY = (255, 88, 88)       # 敌机主体：正红
+ENEMY_EDGE = (150, 40, 40)       # 敌机描边：让三角从背景里立起来
+ENEMY_BULLET_COLOR = (255, 110, 70)   # 敌方子弹：橙红，朝我飞
+PLAYER_BULLET_COLOR = (120, 235, 255)  # 我方子弹：亮青，向上
+SCORE_COLOR = (255, 214, 102)    # 分数：金
+SELF_RING = (255, 255, 255)      # 本机描边
+
+# 8 个玩家颜色**全部取冷色/中性色** —— 玩家绝不能出现红橙，
+# 否则和敌机撞色（协议里 color 是 3 bit，但"用哪 8 种"是显示层自由）
 PALETTE = [
-    (255, 99, 132),
-    (54, 162, 235),
-    (255, 206, 86),
-    (75, 192, 192),
-    (153, 102, 255),
-    (255, 159, 64),
-    (199, 199, 199),
-    (83, 255, 150),
+    (54, 162, 235),    # 蓝
+    (75, 192, 192),    # 青绿
+    (83, 255, 150),    # 绿
+    (153, 102, 255),   # 紫
+    (0, 200, 255),     # 亮青
+    (100, 220, 255),   # 浅蓝
+    (140, 255, 200),   # 薄荷
+    (199, 199, 199),   # 中性灰
 ]
 
 
@@ -231,39 +244,41 @@ def main() -> None:
             screen.fill(BG)
             draw_grid(screen, width, height)
 
-            # 子弹：用 fill（最快的绘制原语）而不是 draw.rect / draw.circle，
-            # 因为 E9 会开到 800 颗，60 fps 下就是 4.8 万次/秒的绘制调用。
+            # 子弹：**两种子弹用不同形状**，不只靠颜色 ——
+            # 我方子弹是细长竖条（一眼看出"往上打"），敌方子弹是小圆点（一眼看出"朝我来"）。
+            # 之前两种都是 4×4 方块、只改颜色，满屏小点点，根本分不清。
             #
             # ⚠️ 子弹**不做插值**：子弹条目没有唯一 ID（只有 owner_id），
             # 客户端无法把这一帧的子弹和上一帧的对应起来（见 protocol/snapshot.py）。
             # 这是协议设计的结果，不是漏做 —— 要平滑只能靠外推或延迟快照缓冲。
-            bullet_size = max(2, int(4 * min(scale_x, scale_y)))
+            bar_w = max(2, int(3 * min(scale_x, scale_y)))
+            bar_h = max(6, int(11 * min(scale_x, scale_y)))
+            dot_r = max(2, int(3 * min(scale_x, scale_y)))
             for bullet in bullets:
-                color = (
-                    PLAYER_BULLET_COLOR if bullet.owner_id else ENEMY_BULLET_COLOR
-                )
-                screen.fill(
-                    color,
-                    (
-                        int(bullet.x * scale_x),
-                        int(bullet.y * scale_y),
-                        bullet_size,
-                        bullet_size,
-                    ),
-                )
+                bx = int(bullet.x * scale_x)
+                by = int(bullet.y * scale_y)
+                if bullet.owner_id:
+                    # 我方：竖条
+                    screen.fill(
+                        PLAYER_BULLET_COLOR,
+                        (bx - bar_w // 2, by - bar_h, bar_w, bar_h),
+                    )
+                else:
+                    # 敌方：圆点 + 深色描边，避免和金色分数混
+                    pygame.draw.circle(screen, ENEMY_BULLET_COLOR, (bx, by), dot_r)
+                    pygame.draw.circle(screen, ENEMY_EDGE, (bx, by), dot_r, 1)
 
-            # 敌机：快照里有 enemy_id，本来可以插值，但占位阶段量少且走得慢，
-            # 直接画最近一帧就够；画成朝下的三角（占位阶段敌机统一向下飞）
-            enemy_size = max(8, int(14 * min(scale_x, scale_y)))
+            # 敌机：朝下的三角 + 描边。
+            # 占位阶段敌机统一向下飞（协议里没有 angle 字段，方向由 type 隐含），
+            # 所以形状固定朝下是对的；按 type 分形状/配色属于步骤 11 的游戏内容。
+            enemy_size = max(12, int(20 * min(scale_x, scale_y)))
             half = enemy_size // 2
             for enemy in enemies:
                 cx = int(enemy.x * scale_x)
                 cy = int(enemy.y * scale_y)
-                pygame.draw.polygon(
-                    screen,
-                    ENEMY_COLOR,
-                    [(cx, cy + half), (cx - half, cy - half), (cx + half, cy - half)],
-                )
+                pts = [(cx, cy + half), (cx - half, cy - half), (cx + half, cy - half)]
+                pygame.draw.polygon(screen, ENEMY_BODY, pts)
+                pygame.draw.polygon(screen, ENEMY_EDGE, pts, 2)
 
             for player_id, player in curr.items():
                 old = prev.get(player_id, player)
@@ -271,13 +286,21 @@ def main() -> None:
                 y = lerp(old.y, player.y, alpha) * scale_y
 
                 color = PALETTE[player.color % len(PALETTE)]
-                size = max(18, int(26 * min(scale_x, scale_y)))
+                size = max(20, int(30 * min(scale_x, scale_y)))
+                cx, cy = int(x), int(y)
                 rect = pygame.Rect(0, 0, size, size)
-                rect.center = (int(x), int(y))
+                rect.center = (cx, cy)
 
+                # 机身 + 机头：加一个朝上的小三角，一眼看出"这是我的方向"
+                nose = max(6, int(10 * min(scale_x, scale_y)))
+                pygame.draw.polygon(
+                    screen, color,
+                    [(cx, rect.top - nose), (cx - nose, rect.top), (cx + nose, rect.top)],
+                )
                 pygame.draw.rect(screen, color, rect, border_radius=5)
-                if player_id == my_id:
-                    pygame.draw.rect(screen, WHITE, rect, 2, border_radius=5)
+                # 描边：本机用白色（一眼找到自己），他人用暗色
+                edge = SELF_RING if player_id == my_id else (40, 46, 60)
+                pygame.draw.rect(screen, edge, rect, 2, border_radius=5)
 
                 label = font.render(f"P{player_id}", True, TEXT)
                 screen.blit(label, (rect.centerx - label.get_width() // 2, rect.top - 20))
