@@ -32,6 +32,13 @@ import time
 import pygame
 
 from client.net import NetworkClient
+from client.sprites import (
+    Explosion,
+    draw_enemy_bullet,
+    draw_enemy_ship,
+    draw_player_bullet,
+    draw_player_ship,
+)
 from protocol.framing import ProtocolError
 from protocol.messages import (
     C_HEARTBEAT,
@@ -175,6 +182,9 @@ def main() -> None:
     curr_time = 0.0
     enemies: tuple = ()
     bullets: tuple = ()
+    prev_enemies: tuple = ()   # 上一帧敌机，用来推断"哪一架被打掉了"
+    curr_enemy_ids: set[int] = set()
+    explosions: list[Explosion] = []   # 纯客户端的击杀特效
     keys = 0
     last_rtt = 0.0
     inputs_sent = 0
@@ -209,7 +219,9 @@ def main() -> None:
                     prev = dict(curr)
                     curr = {p.player_id: p for p in snapshot.players}
                     # 实体直接取最近一帧，不参与插值（原因见模块开头）
+                    prev_enemies = enemies
                     enemies = snapshot.enemies
+                    curr_enemy_ids = {e.enemy_id for e in enemies}
                     bullets = snapshot.bullets
                     curr_time = time.perf_counter()
                     tick = snapshot.tick
@@ -245,40 +257,48 @@ def main() -> None:
             draw_grid(screen, width, height)
 
             # 子弹：**两种子弹用不同形状**，不只靠颜色 ——
-            # 我方子弹是细长竖条（一眼看出"往上打"），敌方子弹是小圆点（一眼看出"朝我来"）。
-            # 之前两种都是 4×4 方块、只改颜色，满屏小点点，根本分不清。
+            # 我方子弹是发光竖条（一眼看出"往上打"），敌方子弹是圆点（一眼看出"朝我来"）。
             #
             # ⚠️ 子弹**不做插值**：子弹条目没有唯一 ID（只有 owner_id），
             # 客户端无法把这一帧的子弹和上一帧的对应起来（见 protocol/snapshot.py）。
             # 这是协议设计的结果，不是漏做 —— 要平滑只能靠外推或延迟快照缓冲。
             bar_w = max(2, int(3 * min(scale_x, scale_y)))
-            bar_h = max(6, int(11 * min(scale_x, scale_y)))
+            bar_h = max(7, int(12 * min(scale_x, scale_y)))
             dot_r = max(2, int(3 * min(scale_x, scale_y)))
             for bullet in bullets:
                 bx = int(bullet.x * scale_x)
                 by = int(bullet.y * scale_y)
                 if bullet.owner_id:
-                    # 我方：竖条
-                    screen.fill(
-                        PLAYER_BULLET_COLOR,
-                        (bx - bar_w // 2, by - bar_h, bar_w, bar_h),
-                    )
+                    draw_player_bullet(screen, bx, by, bar_w, bar_h)
                 else:
-                    # 敌方：圆点 + 深色描边，避免和金色分数混
-                    pygame.draw.circle(screen, ENEMY_BULLET_COLOR, (bx, by), dot_r)
-                    pygame.draw.circle(screen, ENEMY_EDGE, (bx, by), dot_r, 1)
+                    draw_enemy_bullet(screen, bx, by, dot_r)
 
-            # 敌机：朝下的三角 + 描边。
+            # 敌机：矢量的"倒飞小飞机"（机体 + 两翼 + 描边 + 座舱点）。
             # 占位阶段敌机统一向下飞（协议里没有 angle 字段，方向由 type 隐含），
             # 所以形状固定朝下是对的；按 type 分形状/配色属于步骤 11 的游戏内容。
-            enemy_size = max(12, int(20 * min(scale_x, scale_y)))
-            half = enemy_size // 2
+            enemy_size = max(16, int(26 * min(scale_x, scale_y)))
             for enemy in enemies:
-                cx = int(enemy.x * scale_x)
-                cy = int(enemy.y * scale_y)
-                pts = [(cx, cy + half), (cx - half, cy - half), (cx + half, cy - half)]
-                pygame.draw.polygon(screen, ENEMY_BODY, pts)
-                pygame.draw.polygon(screen, ENEMY_EDGE, pts, 2)
+                draw_enemy_ship(
+                    screen,
+                    int(enemy.x * scale_x),
+                    int(enemy.y * scale_y),
+                    enemy_size,
+                    ENEMY_BODY,
+                )
+
+            # 击杀爆炸：**纯客户端表现**。靠"上一帧有、这一帧没了、且消失位置在屏幕中部"
+            # 推断是被打掉了 —— 飞出屏幕底部的不算（那是正常移出画面）。
+            for enemy in prev_enemies:
+                if enemy.enemy_id in curr_enemy_ids:
+                    continue
+                if enemy.y < WORLD_HEIGHT - 60:  # 不是在底边正常出屏
+                    explosions.append(
+                        Explosion(enemy.x * scale_x, enemy.y * scale_y)
+                    )
+            for boom in explosions:
+                boom.update(1.0 / FPS)
+                boom.draw(screen, max(8, int(18 * min(scale_x, scale_y))))
+            explosions[:] = [b for b in explosions if not b.done]
 
             for player_id, player in curr.items():
                 old = prev.get(player_id, player)
@@ -286,24 +306,18 @@ def main() -> None:
                 y = lerp(old.y, player.y, alpha) * scale_y
 
                 color = PALETTE[player.color % len(PALETTE)]
-                size = max(20, int(30 * min(scale_x, scale_y)))
-                cx, cy = int(x), int(y)
-                rect = pygame.Rect(0, 0, size, size)
-                rect.center = (cx, cy)
-
-                # 机身 + 机头：加一个朝上的小三角，一眼看出"这是我的方向"
-                nose = max(6, int(10 * min(scale_x, scale_y)))
-                pygame.draw.polygon(
-                    screen, color,
-                    [(cx, rect.top - nose), (cx - nose, rect.top), (cx + nose, rect.top)],
+                size = max(26, int(40 * min(scale_x, scale_y)))
+                draw_player_ship(
+                    screen, int(x), int(y), size, color,
+                    is_self=(player_id == my_id), t=pygame.time.get_ticks() / 1000.0,
                 )
-                pygame.draw.rect(screen, color, rect, border_radius=5)
-                # 描边：本机用白色（一眼找到自己），他人用暗色
-                edge = SELF_RING if player_id == my_id else (40, 46, 60)
-                pygame.draw.rect(screen, edge, rect, 2, border_radius=5)
 
                 label = font.render(f"P{player_id}", True, TEXT)
-                screen.blit(label, (rect.centerx - label.get_width() // 2, rect.top - 20))
+                # 标签挂在机头上方（玩家绘制不再有 rect，直接按中心点算）
+                screen.blit(
+                    label,
+                    (int(x) - label.get_width() // 2, int(y) - size // 2 - 24),
+                )
 
             # 5) HUD：keys 显示你现在按住了什么，rtt 显示心跳往返耗时
             # 分数由**服务端**算好放在快照里（击杀生效后，见 D-030），客户端只读不算 ——
