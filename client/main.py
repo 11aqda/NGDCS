@@ -25,12 +25,16 @@
     .venv\\Scripts\\python.exe -X utf8 -m client.main 127.0.0.1 9527
 """
 
+import argparse
 import os
 import sys
 import time
 
 import pygame
 
+from client.board import run_board_screen
+from client.login import LoginScreen
+from client.fonts import load_font
 from client.net import NetworkClient
 from client.sprites import (
     Explosion,
@@ -48,6 +52,11 @@ from protocol.messages import (
     S_HEARTBEAT_ACK,
     S_SNAPSHOT,
     S_WELCOME,
+    C_AUTH,
+    S_AUTH_OK,
+    S_AUTH_FAIL,
+    pack_auth,
+    unpack_auth_ok,
     WELCOME,
     now_ms,
     pack_heartbeat,
@@ -126,9 +135,27 @@ def read_keys() -> int:
     return keys
 
 
+def parse_args() -> argparse.Namespace:
+    """位置参数保持老用法：`client.main 127.0.0.1 9527`（向后兼容）。"""
+    parser = argparse.ArgumentParser(description="NGDCS 客户端（pygame）")
+    parser.add_argument("host", nargs="?", default="127.0.0.1")
+    parser.add_argument("port", nargs="?", type=int, default=9527)
+    parser.add_argument(
+        "--api",
+        default="http://127.0.0.1:8000",
+        help="HTTP 认证 / 排行榜服务地址（Django）",
+    )
+    parser.add_argument(
+        "--guest",
+        action="store_true",
+        help="跳过登录界面，以游客身份直接进游戏（不参与排行榜）",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 9527
+    args = parse_args()
+    host, port, api_base = args.host, args.port, args.api
 
     # 让窗口**居中**：不设这个，Windows 会把 720×960 的窗口甩到屏幕右下角，
     # 高 DPI 缩放下右下两边都会被裁掉（实测玩家方块和 SCORE 都看不见了）
@@ -162,8 +189,20 @@ def main() -> None:
     screen = pygame.display.set_mode((width, height))
     pygame.display.set_caption("C/S 实时通信 · 输入 + 心跳 + 实体")
     clock = pygame.time.Clock()
-    font = pygame.font.SysFont("consolas", 18)
-    big_font = pygame.font.SysFont("consolas", 24, bold=True)
+    font = load_font(18)
+    big_font = load_font(24, bold=True)
+
+    # ---- 步骤 10c：先登录（HTTP），拿到 token 再连 TCP ----
+    # 这就是长短连接分层的现场：**登录走 HTTP、对局走 TCP**，token 是两者的接口。
+    token, username = "", "游客"
+    if not args.guest:
+        result = LoginScreen(screen, font, big_font, api_base).run()
+        if result is None:
+            pygame.quit()
+            return
+        token, username = result
+    print(f"[client] 登录身份：{username}"
+          + ("（游客，不参与排行榜）" if not token else "（已认证，将参与排行榜）"))
 
     try:
         net = NetworkClient(host, port)
@@ -172,8 +211,14 @@ def main() -> None:
         pygame.quit()
         return
 
+    # ---- TCP 层认证：把 HTTP 拿到的 token 交给服务端 ----
+    auth_state = "guest"
+    if token:
+        net.send(C_AUTH, pack_auth(token))
+        auth_state = "pending"
+
     print(f"[client] connected to {host}:{port}; window {width}x{height}")
-    print("[client] ←/→ 或 A/D 移动；ESC 退出")
+    print("[client] ←/→ 或 A/D 移动；B 看排行榜；ESC 退出")
 
     my_id = 0
     tick = 0
@@ -203,11 +248,30 @@ def main() -> None:
                     running = False
                 elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     running = False
+                elif event.type == pygame.KEYDOWN and event.key == pygame.K_b:
+                    # 排行榜是**低频请求-响应**数据（D-005 的分层理由），
+                    # 点开才拉一次，不挂在 20 Hz 循环里
+                    if run_board_screen(screen, font, big_font, api_base,
+                                        username) == "quit":
+                        running = False
 
             # 1) 非阻塞收包：这一帧能收多少收多少
             for frame in net.poll():
                 if frame.msg_type == S_WELCOME and len(frame.payload) == WELCOME.size:
                     my_id, _color = WELCOME.unpack(frame.payload)
+                elif frame.msg_type == S_AUTH_OK:
+                    # 服务端确认认证通过（步骤 10b）：回带 player_id + 昵称。
+                    # 认证失败**不影响继续玩**，只是不参与排行榜。
+                    try:
+                        auth_id, auth_name = unpack_auth_ok(frame.payload)
+                        my_id = auth_id
+                        auth_state = "ok"
+                        print(f"[client] 认证通过：player {auth_id} ({auth_name})")
+                    except ProtocolError as exc:
+                        print(f"[client] S_AUTH_OK 解析失败：{exc}")
+                elif frame.msg_type == S_AUTH_FAIL:
+                    auth_state = "failed"
+                    print("[client] 认证失败（token 无效），将以匿名身份继续")
                 elif frame.msg_type == S_SNAPSHOT:
                     try:
                         snapshot = unpack_snapshot(frame.payload)
@@ -325,7 +389,7 @@ def main() -> None:
             my_score = curr[my_id].score if my_id in curr else 0
             hud_line1 = (
                 f"tick={tick}  players={len(curr)}  you=P{my_id}  "
-                f"score={my_score}  "
+                f"score={my_score}  [{username}] "
                 f"e/b={len(enemies)}/{len(bullets)}  fps={clock.get_fps():.0f}"
             )
             hud_line2 = (
