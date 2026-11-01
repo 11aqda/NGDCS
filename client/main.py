@@ -25,6 +25,7 @@
     .venv\\Scripts\\python.exe -X utf8 -m client.main 127.0.0.1 9527
 """
 
+import os
 import sys
 import time
 
@@ -61,6 +62,8 @@ TEXT = (220, 226, 240)
 WHITE = (255, 255, 255)
 RED = (255, 120, 120)
 ENEMY_COLOR = (240, 96, 96)
+# 分数用金色，和玩家/敌机的颜色区分开（HUD 里它是唯一的"成绩"数字）
+SCORE_COLOR = (255, 214, 102)
 PLAYER_BULLET_COLOR = (140, 240, 255)
 ENEMY_BULLET_COLOR = (255, 176, 64)
 
@@ -107,14 +110,32 @@ def main() -> None:
     host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 9527
 
+    # 让窗口**居中**：不设这个，Windows 会把 720×960 的窗口甩到屏幕右下角，
+    # 高 DPI 缩放下右下两边都会被裁掉（实测玩家方块和 SCORE 都看不见了）
+    os.environ.setdefault("SDL_VIDEO_CENTERED", "1")
+
+    # 先声明 DPI 感知：Windows 在 125%/150% 缩放下，**不声明的话**
+    # pygame 报告的屏幕尺寸与实际可用的像素不是一个坐标体系，
+    # 按它算出来的窗口会超出屏幕（实测右侧 SCORE 被裁掉）。
+    # 声明之后逻辑像素 == 物理像素，下面的比例计算才准。
+    try:
+        import ctypes
+
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except Exception:  # noqa: BLE001 - 非 Windows 或旧系统上忽略
+        pass
+
     pygame.init()
     info = pygame.display.Info()
 
-    # 720×960 需要屏幕高度 ≥ 1000；放不下就缩到 600×800
-    if info.current_h < 1000:
-        width, height = 600, 800
-    else:
-        width, height = WORLD_WIDTH, WORLD_HEIGHT
+    # 按屏幕的 85% 等比缩放，保证标题栏 + 窗口完整放得下。
+    # ⚠️ pygame 的 current_w/h 是**逻辑像素**，150% 缩放下实际占屏会是 1.5 倍，
+    # 所以不能只判"高度够不够 1000"，得按比例算。
+    avail_w = int(info.current_w * 0.85)
+    avail_h = int(info.current_h * 0.85)
+    scale = min(1.0, avail_h / WORLD_HEIGHT, avail_w / WORLD_WIDTH)
+    width = max(320, int(WORLD_WIDTH * scale))
+    height = max(426, int(WORLD_HEIGHT * scale))
     scale_x = width / WORLD_WIDTH
     scale_y = height / WORLD_HEIGHT
 
@@ -262,8 +283,12 @@ def main() -> None:
                 screen.blit(label, (rect.centerx - label.get_width() // 2, rect.top - 20))
 
             # 5) HUD：keys 显示你现在按住了什么，rtt 显示心跳往返耗时
+            # 分数由**服务端**算好放在快照里（击杀生效后，见 D-030），客户端只读不算 ——
+            # 客户端没有任何分数上报接口，这是防作弊的设计约束
+            my_score = curr[my_id].score if my_id in curr else 0
             hud_line1 = (
                 f"tick={tick}  players={len(curr)}  you=P{my_id}  "
+                f"score={my_score}  "
                 f"e/b={len(enemies)}/{len(bullets)}  fps={clock.get_fps():.0f}"
             )
             hud_line2 = (
@@ -272,6 +297,11 @@ def main() -> None:
             )
             screen.blit(font.render(hud_line1, True, TEXT), (12, 10))
             screen.blit(font.render(hud_line2, True, TEXT), (12, 34))
+
+            # 分数单独放大显示：这是唯一"玩起来有反馈"的数字
+            if my_id in curr:
+                score_text = big_font.render(f"SCORE {curr[my_id].score}", True, SCORE_COLOR)
+                screen.blit(score_text, (width - score_text.get_width() - 12, 8))
 
             state = "connected" if net.connected else f"disconnected: {net.last_error}"
             screen.blit(font.render(state, True, TEXT), (12, 58))
