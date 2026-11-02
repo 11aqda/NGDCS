@@ -33,7 +33,7 @@ import time
 import pygame
 
 from client.board import run_board_screen
-from client.login import LoginScreen
+from client.login import LoginScreen, authenticate
 from client.fonts import load_font
 from client.net import NetworkClient
 from client.sprites import (
@@ -75,6 +75,7 @@ HEARTBEAT_INTERVAL = 5.0  # 02 §7
 BG = (16, 20, 32)
 GRID = (30, 36, 52)
 TEXT = (220, 226, 240)
+DIM_TEXT = (120, 132, 156)  # HUD 的次要信息（tick / 连接状态）
 WHITE = (255, 255, 255)
 RED = (255, 120, 120)
 
@@ -150,6 +151,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="跳过登录界面，以游客身份直接进游戏（不参与排行榜）",
     )
+    parser.add_argument(
+        "--login",
+        metavar="USER:PASS",
+        default="",
+        help="免交互登录（自动化 / 录屏 / 截图用）：走和登录界面**同一条** HTTP 路径",
+    )
     return parser.parse_args()
 
 
@@ -195,7 +202,17 @@ def main() -> None:
     # ---- 步骤 10c：先登录（HTTP），拿到 token 再连 TCP ----
     # 这就是长短连接分层的现场：**登录走 HTTP、对局走 TCP**，token 是两者的接口。
     token, username = "", "游客"
-    if not args.guest:
+    if args.login:
+        # 免交互登录：自动化和截图场景用。**和登录界面走同一个 `authenticate()`**，
+        # 不存在"绕过认证"的旁路。
+        user, _, password = args.login.partition(":")
+        try:
+            token, username = authenticate(api_base, user, password)
+            print(f"[client] --login 成功：{username}")
+        except ValueError as exc:
+            print(f"[client] --login 失败（{exc}），以游客身份进入")
+            token, username = "", "游客"
+    elif not args.guest:
         result = LoginScreen(screen, font, big_font, api_base).run()
         if result is None:
             pygame.quit()
@@ -386,15 +403,20 @@ def main() -> None:
             # 5) HUD：keys 显示你现在按住了什么，rtt 显示心跳往返耗时
             # 分数由**服务端**算好放在快照里（击杀生效后，见 D-030），客户端只读不算 ——
             # 客户端没有任何分数上报接口，这是防作弊的设计约束
+            #
+            # ⚠️ 排版踩过坑：加上 `[用户名]` 之后第一行变太长，`fps` 直接撞到右上角
+            # 的大号 `SCORE`（实测显示成 "fpsSCORE 10"），`connected` 也压在第 2 行上。
+            # 现在按"每行各管一摊"重排：第 1 行身份/实体、第 2 行输入/延迟/帧率、
+            # 第 3 行 tick 与连接状态，右上角那行只留给 SCORE。
             my_score = curr[my_id].score if my_id in curr else 0
             hud_line1 = (
-                f"tick={tick}  players={len(curr)}  you=P{my_id}  "
-                f"score={my_score}  [{username}] "
-                f"e/b={len(enemies)}/{len(bullets)}  fps={clock.get_fps():.0f}"
+                f"players={len(curr)}  you=P{my_id}  [{username}]  "
+                f"e/b={len(enemies)}/{len(bullets)}"
             )
             hud_line2 = (
                 f"keys={keys:02b}  rtt={last_rtt * 1000:.2f}ms  "
-                f"in={inputs_sent}  hb={heartbeats_acked}/{heartbeats_sent}"
+                f"in={inputs_sent}  hb={heartbeats_acked}/{heartbeats_sent}  "
+                f"fps={clock.get_fps():.0f}"
             )
             screen.blit(font.render(hud_line1, True, TEXT), (12, 10))
             screen.blit(font.render(hud_line2, True, TEXT), (12, 34))
@@ -405,7 +427,8 @@ def main() -> None:
                 screen.blit(score_text, (width - score_text.get_width() - 12, 8))
 
             state = "connected" if net.connected else f"disconnected: {net.last_error}"
-            screen.blit(font.render(state, True, TEXT), (12, 58))
+            state_text = f"tick={tick}  {state}"
+            screen.blit(font.render(state_text, True, DIM_TEXT), (12, 58))
 
             if not curr:
                 waiting = big_font.render("waiting for snapshot...", True, TEXT)

@@ -187,7 +187,7 @@ def _leaderboard_from_redis(limit: int, offset: int) -> tuple[int, list[dict]] |
         }
         names = dict(User.objects.filter(id__in=user_ids).values_list("id", "username"))
         entries = []
-        for index, (member, score) in enumerate(raw):
+        for member, score in raw:
             uid = int(member)
             # **过滤陈旧成员**：Redis 是缓存，数据库重置过、用户被删、切过库，
             # 都会让 ZSET 里残留已经不存在的 user_id。不过滤的话榜上会出现
@@ -196,7 +196,9 @@ def _leaderboard_from_redis(limit: int, offset: int) -> tuple[int, list[dict]] |
                 continue
             entries.append(
                 {
-                    "rank": offset + index + 1,
+                    # ⚠️ 名次用 `len(entries)` 而不是原始下标 ——
+                    # 过滤掉陈旧成员后会留下空号（实测榜上直接从第 2 名开始）。
+                    "rank": offset + len(entries) + 1,
                     "username": names[uid],
                     "best_score": int(score),
                     "max_level": stats.get(uid, {}).get("max_level") or 1,

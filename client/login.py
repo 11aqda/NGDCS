@@ -43,6 +43,36 @@ BTN = (44, 58, 82)
 BTN_HOVER = (62, 84, 118)
 
 
+def authenticate(
+    api_base: str, username: str, password: str, action: str = "login"
+) -> tuple[str, str]:
+    """向 HTTP 认证服务发一次请求，返回 `(token, username)`。
+
+    抽成模块级函数是为了让**界面**和**命令行 `--login`**走同一段代码 ——
+    否则两处各写一遍，参数校验和错误文案迟早不一致。
+
+    失败一律抛 `ValueError(可读的错误信息)`，由调用方决定怎么展示。
+    """
+    path = "/api/auth/login" if action == "login" else "/api/auth/register"
+    try:
+        response = requests.post(
+            f"{api_base.rstrip('/')}{path}",
+            json={"username": username, "password": password},
+            timeout=5,
+        )
+    except requests.RequestException as exc:
+        raise ValueError(f"连不上认证服务器：{type(exc).__name__}") from exc
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise ValueError("服务器返回的不是 JSON") from exc
+
+    if response.status_code >= 400:
+        raise ValueError(data.get("error", f"HTTP {response.status_code}"))
+    return data["token"], data["username"]
+
+
 class LoginScreen:
     """一个自包含的小界面：返回值就是登录结果。"""
 
@@ -95,7 +125,6 @@ class LoginScreen:
             self.message_color = ERROR
             return None
 
-        path = "/api/auth/login" if action == "login" else "/api/auth/register"
         self.busy = True
         self.message = "连接服务器中…"
         self.message_color = DIM
@@ -103,32 +132,19 @@ class LoginScreen:
         pygame.display.flip()
 
         try:
-            response = requests.post(
-                f"{self.api_base}{path}",
-                json={"username": self.username, "password": self.password},
-                timeout=5,
+            token, name = authenticate(
+                self.api_base, self.username, self.password, action
             )
-            data = response.json()
-        except requests.RequestException as exc:
+        except ValueError as exc:
             self.busy = False
-            self.message = f"连不上认证服务器：{type(exc).__name__}"
-            self.message_color = ERROR
-            return None
-        except ValueError:
-            self.busy = False
-            self.message = "服务器返回的不是 JSON"
+            self.message = str(exc)
             self.message_color = ERROR
             return None
 
         self.busy = False
-        if response.status_code >= 400:
-            self.message = data.get("error", f"HTTP {response.status_code}")
-            self.message_color = ERROR
-            return None
-
-        self.message = f"欢迎，{data.get('username', '')}"
+        self.message = f"欢迎，{name}"
         self.message_color = OK
-        return data["token"], data["username"]
+        return token, name
 
     def _handle_key(self, event: pygame.event.Event) -> tuple[str, str] | None:
         if event.key == pygame.K_ESCAPE:

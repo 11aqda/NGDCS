@@ -19,10 +19,10 @@ def check(label: str, condition: bool, detail: str = "") -> None:
     global ok, fail
     if condition:
         ok += 1
-        print(f"  ✅ {label}")
+        print(f"  [PASS] {label}")
     else:
         fail += 1
-        print(f"  ❌ {label}  {detail}")
+        print(f"  [FAIL] {label}  {detail}")
 
 
 def post(path: str, payload: dict) -> requests.Response:

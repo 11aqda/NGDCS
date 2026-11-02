@@ -51,10 +51,10 @@ def check(label: str, condition: bool, detail: str = "") -> None:
     global ok_count, fail_count
     if condition:
         ok_count += 1
-        print(f"  ✅ {label}")
+        print(f"  [PASS] {label}")
     else:
         fail_count += 1
-        print(f"  ❌ {label}  {detail}")
+        print(f"  [FAIL] {label}  {detail}")
 
 
 def wait_port(host: str, port: int, timeout: float = 10.0) -> bool:
@@ -72,7 +72,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=9560)
     parser.add_argument("--api", default="http://127.0.0.1:8000")
-    parser.add_argument("--play-seconds", type=float, default=8.0)
+    parser.add_argument("--play-seconds", type=float, default=14.0)
     args = parser.parse_args()
 
     print("=== 1) HTTP 注册拿 token ===")
@@ -94,7 +94,7 @@ def main() -> None:
         [
             sys.executable, "-X", "utf8", "-u", "-m", "server.main",
             str(args.port),
-            "--enemies", "10", "--bullets", "40",
+            "--enemies", "24", "--bullets", "80",
             "--enable-kills", "--fixed-entities",
             "--persist-scores",
             "--no-metrics", "--no-stats",
@@ -137,8 +137,11 @@ def main() -> None:
         while time.time() - started < args.play_seconds:
             now = time.time()
             if now - last_input >= 0.05:
-                key = KEY_RIGHT if int(now) % 2 == 0 else KEY_LEFT
-                send_frame(sock, C_INPUT, seq, pack_keys(key))
+                # **横扫**而不是原地抖：每 3 秒换一次方向，能把整幅 720 px 宽度走一遍。
+                # 原来写的是 `int(now) % 2`（每秒换向），船只在原地来回抖，
+                # 只覆盖中间一小段，实测 8 秒下来经常 0 分 —— 检查会因为"没打到"而假失败。
+                direction = KEY_RIGHT if int((now - started) / 3.0) % 2 == 0 else KEY_LEFT
+                send_frame(sock, C_INPUT, seq, pack_keys(direction))
                 seq += 1
                 last_input = now
             try:
