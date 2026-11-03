@@ -64,8 +64,16 @@ from server.stats import TickStats
 
 HOST = "0.0.0.0"
 PORT = 9527
-TICK_HZ = 20
-TICK_INTERVAL = 1 / TICK_HZ
+
+# ---- tick 率（E5 的实验自变量）----
+# 默认 20 Hz。E5 会在 10 / 15 / 20 / 30 Hz 四档下测带宽、CPU 和 tick 耗时。
+#
+# ⚠️ **指标窗口必须恒为 1 秒**，否则跨档数据不可比：
+#    窗口 = tick_hz 个 tick（不是写死的 20 个）。
+#    写死 20 的话，10 Hz 下窗口是 2 秒、30 Hz 下是 0.67 秒 ——
+#    带宽/CPU 的"每秒"口径就全乱了，而且不会报错，只会让结论悄悄错掉。
+DEFAULT_TICK_HZ = 20
+TICK_HZ = DEFAULT_TICK_HZ  # 保留这个名字：tests/test_movement.py 直接 import 它
 
 # 02 §7：超时 = 3 × 心跳间隔，单次心跳丢失不应导致误判断线
 HEARTBEAT_TIMEOUT = 15.0
@@ -75,7 +83,7 @@ HEARTBEAT_TIMEOUT = 15.0
 # 玩家会一直往左走到 15 s 超时被踢 —— 观感上是「幽灵移动」。
 INPUT_TTL = 0.5
 
-# 每秒一个统计窗口（20 个 tick），也是指标 CSV 的行频
+# 每秒一个统计窗口，也是指标 CSV 的行频。真实值由 GameServer 按 tick_hz 算（见下）
 STATS_EVERY_TICKS = TICK_HZ
 
 DEFAULT_METRICS_PATH = "data/server_metrics.csv"
@@ -108,6 +116,7 @@ class GameServer:
         encoder: SnapshotEncoder | None = None,
         fixed_entities: bool = False,
         persist_scores: bool = False,
+        tick_hz: int = DEFAULT_TICK_HZ,
     ) -> None:
         self.clients: dict[int, Client] = {}
         self.next_id = 1
@@ -129,6 +138,12 @@ class GameServer:
         self._kills_total = 0
         # 步骤 10b：结算写库。**默认关** —— 实验期绝不能因为连库改变基线
         self.persist_scores = persist_scores
+
+        # E5：tick 率可配。两个派生值一起算，避免散落的 `TICK_HZ` 引用把口径搞乱
+        self.tick_hz = tick_hz
+        self.tick_interval = 1.0 / tick_hz
+        # 统计窗口恒为 **1 秒**（tick_hz 个 tick）—— 这是 E5 跨档可比的前提
+        self.stats_every_ticks = tick_hz
 
     # ---------------------------------------------------------------- 连接
 
@@ -348,7 +363,7 @@ class GameServer:
         logic = stats["sim_ms"] + stats["collision_ms"]
         comms = stats["ser_ms"] + stats["net_ms"]
         print(
-            f"[server] tick {TICK_HZ} Hz | total {stats['avg_ms']:.3f} ms "
+            f"[server] tick {self.tick_hz} Hz | total {stats['avg_ms']:.3f} ms "
             f"(p50 {stats['p50_ms']:.3f} p95 {stats['p95_ms']:.3f} "
             f"max {stats['max_ms']:.3f}) | "
             f"logic {logic:.3f} (sim {stats['sim_ms']:.3f} + "
@@ -391,10 +406,10 @@ class GameServer:
         """固定 20 Hz：用 deadline 累加，避免 sleep 漂移。"""
         loop = asyncio.get_running_loop()
         next_tick = loop.time()
-        print(f"[server] tick loop started at {TICK_HZ} Hz")
+        print(f"[server] tick loop started at {self.tick_hz} Hz")
 
         while True:
-            next_tick += TICK_INTERVAL
+            next_tick += self.tick_interval
             await asyncio.sleep(max(0.0, next_tick - loop.time()))
 
             started = time.perf_counter()
@@ -439,7 +454,7 @@ class GameServer:
             self.stats.record_phase("net", net_done - ser_done)
             self.stats.record_hits(hits)
 
-            if self.tick % STATS_EVERY_TICKS == 0:
+            if self.tick % self.stats_every_ticks == 0:
                 await self.reap_timeouts()
                 window = self.stats.flush()
                 self.report_stats(window)
@@ -507,6 +522,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-metrics", action="store_true", help="不写指标 CSV")
     parser.add_argument(
+        "--tick-hz",
+        type=int,
+        default=DEFAULT_TICK_HZ,
+        help="模拟频率（默认 20）。E5 的自变量：10 / 15 / 20 / 30。"
+        "统计窗口自动保持 1 秒（= tick_hz 个 tick），所以跨档数据可比",
+    )
+    parser.add_argument(
         "--no-stats", action="store_true", help="不打印每秒统计（照旧写 CSV）"
     )
     parser.add_argument(
@@ -550,7 +572,7 @@ async def main(args: argparse.Namespace) -> None:
                 args.scenario,
                 enemies=args.enemies,
                 bullets=args.bullets,
-                tick_rate=TICK_HZ,
+                tick_rate=args.tick_hz,
                 seed=args.seed,
                 encoder=args.encoder,
             )
@@ -564,6 +586,7 @@ async def main(args: argparse.Namespace) -> None:
         encoder=get_encoder(args.encoder),
         fixed_entities=args.fixed_entities,
         persist_scores=args.persist_scores,
+        tick_hz=args.tick_hz,
     )
 
     server = await asyncio.start_server(game.handle_client, HOST, args.port)
@@ -574,7 +597,8 @@ async def main(args: argparse.Namespace) -> None:
     print(
         f"[server] listening on {HOST}:{args.port} (timeout {timeout_text}, "
         f"enemies {args.enemies}, bullets {args.bullets}, seed {args.seed}, "
-        f"encoder {args.encoder}, fixed_entities {fixed_text}, kills {kills_text}, persist {persist_text})"
+        f"tick {args.tick_hz} Hz, encoder {args.encoder}, "
+        f"fixed_entities {fixed_text}, kills {kills_text}, persist {persist_text})"
     )
 
     tick_task = asyncio.create_task(game.tick_loop())

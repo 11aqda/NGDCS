@@ -922,6 +922,127 @@ def plot_e2(
     return written
 
 
+def parse_e5_hz(level: str) -> int | None:
+    """从 `E5-h20` 里取出 tick 率 20。取不到返回 None。
+
+    横轴是**频率**不是实体数，所以 E5 的图不能用 `series_from_runs` 的默认排序。
+    """
+    match = re.search(r"E5-h(\d+)", level)
+    return int(match.group(1)) if match else None
+
+
+def plot_e5(series: list[dict], out_dir: str | Path) -> list[Path]:
+    """E5 的三张图：带宽 / CPU / 单 tick 耗时，横轴都是 tick 率。
+
+    ⚠️ 图 6-12（tick 率 vs 插值误差）**没画** —— 它依赖 `err_px`（插值误差采集），
+    而那是 E4 的前置。没有就只出这三张，不为了一张图去塞一个大功能。
+    所以 6-11 占正式编号，6-11b / 6-11c 是**补充图**，等图表清单那边定。
+
+    带宽口径要写清：CSV 的 `bytes_out` 是**服务端发给所有客户端**的总字节，
+    所以带宽 ≈ 快照字节 × tick 率 × 玩家数。图上标的是"4 名玩家"。
+    """
+    points = []
+    for item in series:
+        tick_hz = parse_e5_hz(item["level"])
+        if tick_hz is None:
+            continue
+        points.append((tick_hz, item))
+    if not points:
+        return []
+    points.sort(key=lambda pair: pair[0])
+
+    xs = [hz for hz, _ in points]
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+
+    def _plot(y_key: str, ylabel: str, title: str, filename: str,
+              color: str, note: str = "", ymin0: bool = False,
+              note_y: float = 0.95) -> None:
+        ys = [item.get(y_key) for _, item in points]
+        if any(y is None for y in ys):
+            print(f"[plot] {filename} 跳过：{y_key} 有缺失")
+            return
+        fig, ax = plt.subplots(figsize=(7.2, 4.6))
+        ax.plot(xs, ys, marker="o", linewidth=2, color=color, markersize=7)
+        for x, y in zip(xs, ys):
+            ax.annotate(f"{y:.3g}", (x, y), textcoords="offset points",
+                        xytext=(0, 10), ha="center", fontsize=9)
+        ax.set_xlabel("tick 率 (Hz)")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.set_xticks(xs)
+        ax.grid(True, alpha=0.3)
+        if ymin0:
+            # 从 0 起：四档的绝对差只有 0.04 ms，自动缩放会把这条"几乎不变"的线
+            # 画成大起大落，反而误导。从 0 起才是这张图真正要说的话。
+            ax.set_ylim(0, max(ys) * 1.25)
+        if note:
+            ax.text(0.03, note_y, note, transform=ax.transAxes,
+                    fontsize=8, va="top", color="#555555")
+        fig.tight_layout()
+        path = out_dir / filename
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        written.append(path)
+
+    # ⚠️ 玩家数取 `players`（= 快照里的 client_count 均值），**不是 `entities`** ——
+    # `entities` 是"玩家+敌机+子弹"的总数（本例 234），拿它当人数会把带宽虚高 58 倍。
+    players = int(round(_mean([item.get("players") or 0 for _, item in points]) or 4))
+
+    # ⚠️ 带宽口径：`bw_per_client_bps` 是**单客户端**的，
+    # 而服务端真正压的是**上行总带宽** = 单客户端 × 玩家数。
+    # 第一版图画成了单客户端值、注释却写"× 玩家数"，自相矛盾 —— 这里统一成总带宽，
+    # 并在图上标出单客户端是多少，两个数都不丢。
+    def _total_bw(item: dict) -> float | None:
+        per_client = item.get("bw_per_client_bps")
+        if per_client is None:
+            return None
+        return per_client * players / 1024  # KB/s
+
+    per_client_kbps = (points[0][1].get("bw_per_client_bps") or 0) / 1024
+
+    total = [(_total_bw(item) if _total_bw(item) is not None else None) for _, item in points]
+    if all(value is not None for value in total):
+        fig, ax = plt.subplots(figsize=(7.2, 4.6))
+        ax.plot(xs, total, marker="o", linewidth=2, color="#2b6cb0", markersize=7)
+        for x, y in zip(xs, total):
+            ax.annotate(f"{y:.1f}", (x, y), textcoords="offset points",
+                        xytext=(0, 10), ha="center", fontsize=9)
+        ax.set_xlabel("tick 率 (Hz)")
+        ax.set_ylabel("服务端上行带宽 (KB/s)")
+        ax.set_title("图 6-11   tick 率与带宽")
+        ax.set_xticks(xs)
+        ax.grid(True, alpha=0.3)
+        slope = total[-1] / xs[-1] if xs[-1] else 0
+        ax.text(
+            0.03, 0.95,
+            f"{players} 名玩家 · 30 敌机 · 200 子弹\n"
+            f"快照 {points[0][1].get('snapshot_bytes', 0):.0f} B/帧 × {players} 人\n"
+            f"线性斜率 ≈ {slope:.2f} KB/s per Hz",
+            transform=ax.transAxes, fontsize=8, va="top", color="#555555",
+        )
+        fig.tight_layout()
+        path = out_dir / "6-11-tick-vs-bandwidth.png"
+        fig.savefig(path, dpi=160)
+        plt.close(fig)
+        written.append(path)
+
+    _plot(
+        "cpu_percent", "服务端 CPU (%)", "图 6-11b   tick 率与 CPU（补充）",
+        "6-11b-tick-vs-cpu.png", "#b7791f",
+        note="cpu_seconds 首尾差 ÷ 墙钟秒",
+    )
+    _plot(
+        "tick_ms_avg", "单 tick 耗时 (ms)", "图 6-11c   tick 率与单 tick 耗时（补充）",
+        "6-11c-tick-vs-tickms.png", "#2f855a",
+        note="每个 tick 干的活一样，所以四档应当重合\n"
+             "（y 轴从 0 起；极差仅 0.04 ms）",
+        ymin0=True, note_y=0.52,
+    )
+    return written
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="出图：E9 四张（图 6-17~6-20）或 E1 三张（图 6-1~6-3）"
@@ -942,7 +1063,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--figures",
         default="auto",
-        choices=("auto", "e9", "e1", "e2"),
+        choices=("auto", "e9", "e1", "e2", "e5"),
         help="出哪一套图。auto = 数据里带编码段就出 E1 的三张，"
         "场景名是 E2-c* 就出 E2 的三张，否则出 E9 的四张"
         "（E1/E9 数据同时存在时按 --scenario 过滤后再判断）",
@@ -1056,6 +1177,16 @@ def main() -> None:
             figure_set = "e2"
         else:
             figure_set = "e9"
+
+    if figure_set == "e5":
+        # E5 的横轴是 tick 率；`series` 默认按实体数排序，这里不用管顺序，
+        # plot_e5 内部会按 Hz 重排
+        paths = plot_e5(series, args.out)
+        if not paths:
+            print("[plot] 没有可识别的 E5 数据（场景名需形如 E5-h20-r1）")
+        for path in paths:
+            print(f"[plot] 已写出 {path}")
+        return
 
     if figure_set == "e2":
         skip = tuple(x.strip() for x in args.skip_levels.split(",") if x.strip())
