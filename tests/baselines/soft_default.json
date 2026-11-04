@@ -1,0 +1,14 @@
+{
+  "note": "软校验基线。桌面机上的近似值，比对时给 ±20% 容差。",
+  "conditions": {
+    "players": 4,
+    "enemies": 30,
+    "bullets": 200,
+    "sample_s": 15.0
+  },
+  "e9": {
+    "bytes_per_s_per_client": 37188.6,
+    "interval_p50_ms": 47.0,
+    "tick_ms_avg": null
+  }
+}

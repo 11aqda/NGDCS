@@ -1,0 +1,129 @@
+{
+  "note": "默认（占位）路径的黄金基线。**只有故意改变默认行为时才更新**。",
+  "conditions": {
+    "players": 4,
+    "player_xs": [
+      100,
+      260,
+      420,
+      580
+    ],
+    "enemies": 30,
+    "bullets": 200,
+    "seed": 1,
+    "ticks": 200,
+    "encoder": "binary",
+    "enable_kills": false,
+    "fixed_entities": true,
+    "tick_hz": 20
+  },
+  "payload_len_unique": [
+    1927
+  ],
+  "total_bytes": 385400,
+  "sha256": "7860bdb912d92c1f22f29aafc895e1e5db9cb3aec078bd8f8b5780190ab45e4a",
+  "probes": [
+    {
+      "tick": 1,
+      "level": 1,
+      "wave": 1,
+      "wave_state": 0,
+      "player_count": 4,
+      "enemy_count": 30,
+      "bullet_count": 200,
+      "item_count": 0,
+      "boss_present": 0,
+      "payload_len": 1927,
+      "first_enemies": [
+        [
+          177,
+          0
+        ],
+        [
+          622,
+          0
+        ],
+        [
+          104,
+          0
+        ],
+        [
+          301,
+          0
+        ],
+        [
+          160,
+          0
+        ]
+      ]
+    },
+    {
+      "tick": 100,
+      "level": 1,
+      "wave": 1,
+      "wave_state": 0,
+      "player_count": 4,
+      "enemy_count": 30,
+      "bullet_count": 200,
+      "item_count": 0,
+      "boss_present": 0,
+      "payload_len": 1927,
+      "first_enemies": [
+        [
+          177,
+          297
+        ],
+        [
+          622,
+          297
+        ],
+        [
+          104,
+          297
+        ],
+        [
+          301,
+          297
+        ],
+        [
+          160,
+          297
+        ]
+      ]
+    },
+    {
+      "tick": 200,
+      "level": 1,
+      "wave": 1,
+      "wave_state": 0,
+      "player_count": 4,
+      "enemy_count": 30,
+      "bullet_count": 200,
+      "item_count": 0,
+      "boss_present": 0,
+      "payload_len": 1927,
+      "first_enemies": [
+        [
+          177,
+          597
+        ],
+        [
+          622,
+          597
+        ],
+        [
+          104,
+          597
+        ],
+        [
+          301,
+          597
+        ],
+        [
+          160,
+          597
+        ]
+      ]
+    }
+  ]
+}
