@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import re
 from collections import defaultdict
@@ -1043,6 +1044,66 @@ def plot_e5(series: list[dict], out_dir: str | Path) -> list[Path]:
     return written
 
 
+def plot_e5_errpx(out_dir: str | Path, run_dir: str | Path) -> list[Path]:
+    """图 6-12：tick 率 vs 插值误差（`err_px`）。
+
+    数据来自 `data/runs/E5-errpx.json`（`tools/run_e5_errpx.py` 产出），
+    因为 err_px 是**客户端侧**指标，不在服务端指标 CSV 里。
+
+    ⚠️ 这张图**不符合**"频率越低误差越大"的直觉 —— 本项目的速度是"每 tick 固定像素"
+    而不是"每秒像素"，详见 `tools/run_e5_errpx.py` 顶部。图注必须写清楚，
+    否则会被误读成"频率越低越准"（恰恰相反，那是设计耦合的产物）。
+    """
+    path = Path(run_dir) / "E5-errpx.json"
+    if not path.exists():
+        print(f"[plot] 跳过图 6-12：{path} 不存在（先跑 tools.run_e5_errpx）")
+        return []
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    groups: dict[int, list[dict]] = {}
+    for run in data.get("runs", []):
+        if run.get("ok") and isinstance(run.get("err_px_mean"), (int, float)):
+            groups.setdefault(run["tick_hz"], []).append(run)
+
+    if not groups:
+        print("[plot] 跳过图 6-12：没有有效的 err_px 样本")
+        return []
+
+    xs = sorted(groups)
+    means = [sum(r["err_px_mean"] for r in groups[hz]) / len(groups[hz]) for hz in xs]
+    p95s = [sum(r["err_px_p95"] for r in groups[hz]) / len(groups[hz]) for hz in xs]
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    ax.plot(xs, means, marker="o", linewidth=2, color="#b7791f",
+            markersize=7, label="均值")
+    ax.plot(xs, p95s, marker="s", linewidth=1.6, color="#9c4221",
+            markersize=6, linestyle="--", label="P95")
+    for x, y in zip(xs, means):
+        ax.annotate(f"{y:.2f}", (x, y), textcoords="offset points",
+                    xytext=(0, -16), ha="center", fontsize=9)
+    ax.set_xlabel("tick 率 (Hz)")
+    ax.set_ylabel("插值误差 err_px (px)")
+    ax.set_title("图 6-12   tick 率与插值误差")
+    ax.set_xticks(xs)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, max(max(means), max(p95s)) * 1.35)
+    ax.legend(loc="upper right", fontsize=9)
+    ax.text(
+        0.03, 0.96,
+        "误差随频率上升而下降：速度定义为「每 tick 15 px」而非「每秒像素」，\n"
+        "高频下实际速度更快、更早被场地边界卡住，位移为 0 的帧更多\n"
+        f"（4 玩家 · 30 敌机 · 200 子弹 · 采样 {data.get('sample_s', 0):.0f}s）",
+        transform=ax.transAxes, fontsize=7.5, va="top", color="#555555",
+    )
+    fig.tight_layout()
+    out = out_dir / "6-12-tick-vs-errpx.png"
+    fig.savefig(out, dpi=160)
+    plt.close(fig)
+    return [out]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="出图：E9 四张（图 6-17~6-20）或 E1 三张（图 6-1~6-3）"
@@ -1184,6 +1245,8 @@ def main() -> None:
         paths = plot_e5(series, args.out)
         if not paths:
             print("[plot] 没有可识别的 E5 数据（场景名需形如 E5-h20-r1）")
+        # 图 6-12 的数据源是机器人 JSON，不在指标 CSV 里
+        paths += plot_e5_errpx(args.out, args.run_dir)
         for path in paths:
             print(f"[plot] 已写出 {path}")
         return
