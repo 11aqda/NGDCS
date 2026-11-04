@@ -18,9 +18,9 @@
 | 图 6-5 | 连接数 vs tick 耗时 | 折线 | E2 | 🤖 `plot_e2` | ✅ `fig6-05-clients-vs-tick.png` |
 | 图 6-6 | RTT 分位数（P50/P95/P99） | 折线 | E2 | 🤖 `plot_e2`（读 runs/ 的 JSON） | ✅ `fig6-06-clients-vs-rtt.png` |
 | 图 6-7 | IO 模型资源对比 | 折线 | E3 | — | ⬜ 只做理论讨论 |
-| 图 6-8 | 丢包率 vs 插值误差 | 折线 | E4 | 🤖 待写 | ⬜ 未做（缺 `err_px`） |
-| 图 6-9 | 延迟 vs 插值误差 | 折线 | E4 | 🤖 待写 | ⬜ 未做（缺 `err_px`） |
-| 图 6-10 | 丢包 × 延迟 热力图 | 热力图 | E4 | 🤖 待写 | ⬜ 未做（缺 `err_px`） |
+| 图 6-8 | 丢包率 vs 插值误差 | 折线 | E4 | 🤖 `plot_e4` | ✅ `6-8-loss-vs-errpx.png`（主线是 P95） |
+| 图 6-9 | 延迟 vs 插值误差 | 折线 | E4 | 🤖 `plot_e4` | ✅ `6-9-delay-vs-errpx.png`（含抖动对照） |
+| 图 6-10 | 丢包 × 延迟 热力图 | 热力图 | E4 | 🤖 `plot_e4` | ✅ `6-10-loss-delay-heatmap.png` |
 | 图 6-11 | tick 率 vs 带宽 | 折线 | E5 | 🤖 `plot_e5` | ✅ `6-11-tick-vs-bandwidth.png`（解析式误差 ≤0.14%） |
 | 图 6-12 | tick 率 vs 插值误差 | 折线 | E5 | 🤖 `plot_e5_errpx` | ✅ `6-12-tick-vs-errpx.png`（结论与直觉相反，见 E5 §5.4） |
 | 图 6-13 | 三种快照策略带宽对比 | 柱状 | E6 | — | ⬜ 只做理论讨论 |
