@@ -174,5 +174,51 @@ class LoginScreenTest(unittest.TestCase):
         self.assertEqual(len(screen.username), 20)
 
 
+
+class InterpolationRegressionTest(unittest.TestCase):
+    """守住一个曾经存在、影响过 E4/E5 结论解读的 bug。
+
+    `client/main.py` 原来用**写死的** `TICK_INTERVAL = 0.05`（20 Hz 的间隔）
+    当插值分母。后果：
+
+      · 30 Hz：真实间隔 33 ms，alpha 按 50 ms 算 → 永远追不上，画面"拖影"
+      · 10 Hz：真实间隔 100 ms，alpha 50 ms 就到 1 并钳住 → 后 50 ms 冻住再跳
+      · 抖动时：相邻间隔忽大忽小，固定分母与真实节奏完全不匹配
+
+    正确做法是按**两帧实际到达时刻**算，并且复用 `protocol/interp.py::clamp_alpha`
+    —— **测量（err_px）和渲染必须是同一个公式**，否则实验结论和玩家体验就是两回事。
+    """
+
+    def test_client_uses_measured_interval(self):
+        import inspect
+
+        import client.main as client_main
+
+        # 模块级不能再有写死的 TICK_INTERVAL（用属性判断，别用字符串扫描 ——
+        # 解释性注释里会提到这个名字，扫字符串会误报）
+        self.assertFalse(
+            hasattr(client_main, "TICK_INTERVAL"),
+            "客户端不该再有写死的 TICK_INTERVAL —— 插值分母必须来自实际到达时刻",
+        )
+        source = inspect.getsource(client_main)
+        self.assertIn("clamp_alpha", source,
+                      "客户端插值必须复用 protocol/interp.py 的 clamp_alpha")
+        self.assertIn("curr_arrived_at", source)
+        self.assertIn("prev_arrived_at", source)
+
+    def test_clamp_alpha_matches_render_intent(self):
+        """插值系数的语义：**新帧到达时 alpha=0（显示上一帧），过一个间隔才到 1**。
+
+        这正是"渲染滞后一帧"的来源，也是 err_px 的基线不为 0 的原因
+        （见 protocol/interp.py 的模块注释与 E4 §3.2 ①）。
+        关键是这个规律**与频率无关**：33 ms 和 100 ms 的间隔表现一致。
+        """
+        from protocol.interp import clamp_alpha
+
+        for span in (0.033, 0.100):          # 30 Hz / 10 Hz
+            self.assertAlmostEqual(clamp_alpha(span, 0.0, span), 0.0, places=9)
+            self.assertAlmostEqual(clamp_alpha(span + span / 2, 0.0, span), 0.5, places=9)
+            self.assertAlmostEqual(clamp_alpha(span * 2, 0.0, span), 1.0, places=9)
+
 if __name__ == "__main__":
     unittest.main()

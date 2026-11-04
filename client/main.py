@@ -4,7 +4,8 @@
     1. 非阻塞网络：每帧 poll 一次，绝不卡住渲染（D-007）
     2. **键盘输入**：每 50 ms 发一次 C_INPUT，只发「按了什么键」，不发坐标（D-006）
     3. **心跳**：每 5 s 发一次 C_HEARTBEAT，HUD 上显示 RTT —— 让「心跳在工作」肉眼可见
-    4. 插值：保存前后两帧快照，在 50 ms 内从旧位置线性过渡到新位置
+    4. 插值：保存前后两帧快照，按**两帧的实际到达间隔**从旧位置线性过渡到新位置
+       （不能用写死的 1/20 秒 —— tick 率或网络抖动一变，节奏就全错，见 alpha 处注释）
     5. **实体渲染**：把快照里的敌机与子弹画出来（占位实体，见 server/entities.py）
     6. 绘制：720×960 竖版窗口，占位方块 + 网格 + HUD
 
@@ -64,11 +65,11 @@ from protocol.messages import (
     rtt_ms,
     unpack_heartbeat_ack,
 )
+from protocol.interp import clamp_alpha
 from protocol.snapshot import unpack_snapshot
 from protocol.world import WORLD_HEIGHT, WORLD_WIDTH
 
 FPS = 60
-TICK_INTERVAL = 0.05  # 20 Hz 快照间隔
 INPUT_INTERVAL = 0.05  # 20 Hz，与 tick 同频（定频发送，天然冗余）
 HEARTBEAT_INTERVAL = 5.0  # 02 §7
 
@@ -241,7 +242,8 @@ def main() -> None:
     tick = 0
     prev: dict = {}
     curr: dict = {}
-    curr_time = 0.0
+    prev_arrived_at = 0.0   # 上一帧快照的到达时刻（插值分母用）
+    curr_arrived_at = 0.0   # 当前帧快照的到达时刻
     enemies: tuple = ()
     bullets: tuple = ()
     prev_enemies: tuple = ()   # 上一帧敌机，用来推断"哪一架被打掉了"
@@ -304,7 +306,10 @@ def main() -> None:
                     enemies = snapshot.enemies
                     curr_enemy_ids = {e.enemy_id for e in enemies}
                     bullets = snapshot.bullets
-                    curr_time = time.perf_counter()
+                    # 记住**两帧各自的到达时刻**：插值系数要用真实间隔算，
+                    # 不能用写死的 1/20 秒（见下面 alpha 处的长注释）
+                    prev_arrived_at = curr_arrived_at
+                    curr_arrived_at = time.perf_counter()
                     tick = snapshot.tick
                 elif frame.msg_type == S_HEARTBEAT_ACK:
                     client_time, _server_time = unpack_heartbeat_ack(frame.payload)
@@ -312,9 +317,26 @@ def main() -> None:
                     last_rtt = rtt_ms(client_time) / 1000.0
                     heartbeats_acked += 1
 
-            # 2) 计算插值系数：新快照到达后的 50 ms 内 0 → 1
+            # 2) 计算插值系数 alpha ∈ [0, 1]，**分母是两帧的实际到达间隔**
+            #
+            # ⚠️ 这里曾经写死 `TICK_INTERVAL = 0.05`（= 20 Hz 的间隔），是个真 bug：
+            #
+            #   tick 率 30 Hz 时：真实间隔 33 ms，但 alpha 按 50 ms 算 → 到 33 ms 才 0.67，
+            #                     下一帧就到了，画面**永远跟不上**、看起来像在"拖影"
+            #   tick 率 10 Hz 时：真实间隔 100 ms，alpha 在 50 ms 就到 1.0 并钳住
+            #                     → 后 50 ms 画面**冻住**，然后跳一下
+            #   网络有抖动时：相邻间隔忽大忽小，用固定值算的 alpha 与真实节奏完全不匹配
+            #
+            # E4/E5 两次实验已经把这个问题量出来了（err_px 随抖动、随 tick 率变化），
+            # 现在按**实际间隔**算，才是那两章结论所描述的那个算法。
+            #
+            # 复用 `protocol/interp.py` 的 `clamp_alpha`：**测量和渲染必须是同一个公式**，
+            # 否则"实验测到的误差"和"玩家看到的画面"就是两回事。
             now = time.perf_counter()
-            alpha = min(1.0, (now - curr_time) / TICK_INTERVAL) if curr else 0.0
+            if curr:
+                alpha = clamp_alpha(now, prev_arrived_at, curr_arrived_at)
+            else:
+                alpha = 0.0
 
             # 3) 定频上报输入 + 定时心跳（都是「排进队列」，真正的发送在下一帧 poll）
             #
