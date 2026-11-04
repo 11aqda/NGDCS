@@ -89,6 +89,73 @@ class Bullet:
     speed: int = BULLET_SPEED_PER_TICK
 
 
+class PlaceholderPolicy:
+    """**占位阶段的实体行为**：出生点固定、速度恒定、弹道直线。
+
+    步骤 11 要加"敌机类型 / 波次 / 射击间隔 / BOSS"，如果把这些 if-else 直接塞进
+    `World`，默认路径和游戏路径就会缠在一起，实验基线迟早被误伤。所以先在这里
+    把"怎么出生、怎么飞"抽成策略：
+
+        World(..., policy=PlaceholderPolicy())   # 默认，一切照旧
+        World(..., policy=GamePolicy())          # 步骤 11 的 --game-mode
+
+    ## ⚠️ 本次是**零改动重构**，硬约束如下
+
+    1. **不增加、不减少、不重排任何 `rng` 调用**。
+       每个实体出生恰好一次 `randrange` —— 多一次或少一次，随机数序列就整体错位，
+       200 帧的 SHA 会立刻变，而代码看上去"完全正确"。这是本文件最危险的地方。
+    2. **不改任何常量、不改变运算顺序**。
+    3. 验收标准：黄金基线 SHA = `7860bdb912d92c1f22f29aafc895e1e5db9cb3aec078bd8f8b5780190ab45e4a`。
+
+    SHA 变了就说明行为真的变了 —— **先回退定位，不许调参数让它对上**。
+
+    ## 接口
+
+    - `enemy_spawn(rng)` → `(x, y)`：出生位置
+    - `enemy_move(enemy)` → `(dx, dy)`：每 tick 位移
+    - `bullet_spawn(rng, players, want_player)` → `(owner_id, x, y, type, angle, speed)`
+    - `bullet_move(bullet)` → `(dx, dy)`：每 tick 位移
+
+    为什么让策略只返回**数值**、由 `World` 去构造实体：`enemy_id` 的分配与 uint16
+    回绕是世界的状态，不该让策略碰；这样策略替换也不会影响 ID 序列。
+    """
+
+    def enemy_spawn(self, rng: random.Random) -> tuple[int, int]:
+        """敌机从屏幕顶边进场，横向随机。**恰好一次 rng 调用。**"""
+        return rng.randrange(SPAWN_MARGIN, WORLD_WIDTH - SPAWN_MARGIN), 0
+
+    def enemy_move(self, enemy: Enemy) -> tuple[int, int]:
+        """占位敌机统一向下匀速飞（协议里敌机没有 angle 字段，方向由 type 隐含）。"""
+        return 0, ENEMY_SPEED_PER_TICK
+
+    def bullet_spawn(
+        self,
+        rng: random.Random,
+        players: list[tuple[int, int]],
+        want_player: bool,
+    ) -> tuple[int, int, int, int, int, int]:
+        """一半玩家子弹（向上）、一半敌方子弹（向下），轮流出。
+
+        **两条分支各自恰好一次 rng 调用** —— 分支不同但调用次数相同，
+        所以轮换的奇偶不影响随机数序列的长度。
+        """
+        if want_player and players:
+            player_id, x = players[rng.randrange(len(players))]
+            return player_id, x, PLAYER_BULLET_SPAWN_Y, BULLET_PLAYER_L1, ANGLE_UP, BULLET_SPEED_PER_TICK
+
+        return (
+            0,  # 敌方子弹的 owner_id 固定为 0（02 §6.2）
+            rng.randrange(SPAWN_MARGIN, WORLD_WIDTH - SPAWN_MARGIN),
+            0,
+            BULLET_ENEMY_SPREAD,
+            ANGLE_DOWN,
+            BULLET_SPEED_PER_TICK,
+        )
+
+    def bullet_move(self, bullet: Bullet) -> tuple[int, int]:
+        return angle_to_delta(bullet.angle, bullet.speed)
+
+
 class World:
     """一张只有「匀速直线飞」的场地。
 
@@ -105,6 +172,7 @@ class World:
         seed: int = 1,
         enable_kills: bool = False,
         fixed_entities: bool = False,
+        policy: "PlaceholderPolicy | None" = None,
     ) -> None:
         # 上限来自协议本身：enemy_count 是 uint8、bullet_count 是 uint16
         if not 0 <= enemy_target <= 0xFF:
@@ -129,6 +197,9 @@ class World:
         # 玩家看不到"打掉了"的反馈
         self.respawn_per_tick = 2
 
+        # 实体行为策略（步骤 11 的扩展点）。默认 = 占位行为，与重构前逐字节相同。
+        self.policy = policy if policy is not None else PlaceholderPolicy()
+
         self.enemies: list[Enemy] = []
         self.bullets: list[Bullet] = []
         self.next_enemy_id = 1
@@ -144,8 +215,11 @@ class World:
     def _move(self) -> None:
         # 敌机条目里**没有 angle 字段**（02 §6.2）—— 竖版飞机大战的敌机都是向下，
         # 方向由 type 隐含，所以占位敌机统一向下飞。
+        # 位移交给策略算（步骤 11 的敌机类型轨迹不同），World 只负责累加与剔除。
         for enemy in self.enemies:
-            enemy.y += ENEMY_SPEED_PER_TICK
+            dx, dy = self.policy.enemy_move(enemy)
+            enemy.x += dx
+            enemy.y += dy
 
         # 出屏即剔除（D-012）：不写进快照 = 客户端删掉它。
         # 顺带保证坐标永远落在 uint16 值域内，不会像 D-012 记录的那样 struct.error。
@@ -153,7 +227,7 @@ class World:
 
         alive: list[Bullet] = []
         for bullet in self.bullets:
-            dx, dy = angle_to_delta(bullet.angle, bullet.speed)
+            dx, dy = self.policy.bullet_move(bullet)
             bullet.x += dx
             bullet.y += dy
             if 0 <= bullet.x <= WORLD_WIDTH and 0 <= bullet.y <= WORLD_HEIGHT:
@@ -176,37 +250,32 @@ class World:
             self.bullets.append(self._spawn_bullet(players))
 
     def _spawn_enemy(self) -> Enemy:
-        enemy = Enemy(
-            enemy_id=self.next_enemy_id,
-            x=self.rng.randrange(SPAWN_MARGIN, WORLD_WIDTH - SPAWN_MARGIN),
-            y=0,  # 从屏幕顶边进场
-        )
+        x, y = self.policy.enemy_spawn(self.rng)
+        enemy = Enemy(enemy_id=self.next_enemy_id, x=x, y=y)
         self.next_enemy_id += 1
         if self.next_enemy_id > 0xFFFF:  # enemy_id 是 uint16，绕回来
             self.next_enemy_id = 1
         return enemy
 
     def _spawn_bullet(self, players: list[tuple[int, int]]) -> Bullet:
-        """一半玩家子弹（向上）、一半敌方子弹（向下），轮流出。"""
+        """一半玩家子弹（向上）、一半敌方子弹（向下），轮流出。
+
+        轮换状态留在 World（它是世界的状态，不是行为策略的一部分）；
+        具体的出生位置/类型/弹道由 policy 决定。
+        """
         want_player = self._player_bullet_turn
         self._player_bullet_turn = not want_player
 
-        if want_player and players:
-            player_id, x = players[self.rng.randrange(len(players))]
-            return Bullet(
-                owner_id=player_id,
-                x=x,
-                y=PLAYER_BULLET_SPAWN_Y,
-                type=BULLET_PLAYER_L1,
-                angle=ANGLE_UP,
-            )
-
+        owner_id, x, y, bullet_type, angle, speed = self.policy.bullet_spawn(
+            self.rng, players, want_player
+        )
         return Bullet(
-            owner_id=0,  # 敌方子弹的 owner_id 固定为 0（02 §6.2）
-            x=self.rng.randrange(SPAWN_MARGIN, WORLD_WIDTH - SPAWN_MARGIN),
-            y=0,
-            type=BULLET_ENEMY_SPREAD,
-            angle=ANGLE_DOWN,
+            owner_id=owner_id,
+            x=x,
+            y=y,
+            type=bullet_type,
+            angle=angle,
+            speed=speed,
         )
 
     # ------------------------------------------------------------ 导出快照
