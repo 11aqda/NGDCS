@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 
 from bot.agent import BotConfig, BotResult, run_farm
+from protocol.interp import PlayerInterp
 
 __all__ = ["BotConfig", "BotResult", "percentile", "summarize", "main"]
 
@@ -57,6 +58,10 @@ def summarize(
     inputs_sent = sum(r.inputs_sent for r in results)
     heartbeats_sent = sum(r.heartbeats_sent for r in results)
     heartbeats_acked = sum(r.heartbeats_acked for r in results)
+    # err_px：把**各机器人自己**的样本合在一起。每台机器人只跟踪自己，
+    # 所以合并后就是"所有玩家视角下的显示误差"分布
+    err_samples = [value for r in results for value in r.err_track.samples]
+    err_summary = PlayerInterp(samples=err_samples).summary()
 
     return {
         "host": config.host,
@@ -85,6 +90,9 @@ def summarize(
         # P99 供图 6-6（RTT 分位数曲线）：只看均值会掩盖尾部抖动，
         # 而实时同步最怕的恰恰是尾部（卡一下在客户端就是"瞬移"）。
         "rtt_p99_ms": round(percentile(rtts, 0.99) * 1000, 3),
+        # err_px 只有在 --err-px 打开时才有样本；没开就是 null（不是 0 —— 0 会被当成"误差为零"）
+        **err_summary,
+        "sim_loss": config.sim_loss,
         "errors": len(errors),
         "error_samples": errors[:5],
     }
@@ -120,6 +128,19 @@ def parse_args() -> argparse.Namespace:
         "--seed", type=int, default=0, help="按键随机种子；0 = 系统随机，非 0 = 可复现"
     )
     parser.add_argument("--out", default="", help="把汇总写到 JSON 文件")
+    parser.add_argument(
+        "--err-px",
+        action="store_true",
+        help="采集插值误差 err_px（E4 / 图 6-8~6-10、6-12）。"
+        "默认关 —— 它要逐帧 unpack_snapshot，会给机器人加开销，会改变 E2/E9 的基线",
+    )
+    parser.add_argument(
+        "--sim-loss",
+        type=float,
+        default=0.0,
+        help="客户端侧丢包模拟（0~1）：按概率把收到的快照当没收到。"
+        "只用来在本地验证 err_px 这把尺子是准的，不替代 E4 的真实链路",
+    )
     return parser.parse_args()
 
 
@@ -132,6 +153,8 @@ async def async_main(args: argparse.Namespace) -> None:
         heartbeat=args.heartbeat,
         key_hold=args.key_hold,
         seed=args.seed,
+        measure_err_px=args.err_px,
+        sim_loss=max(0.0, min(1.0, args.sim_loss)),
     )
 
     started = time.perf_counter()

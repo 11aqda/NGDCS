@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field, replace
 
 from protocol.framing import HEADER, ProtocolError, recv_frame_async, send_frame_async
+from protocol.interp import PlayerInterp
 from protocol.messages import (
     C_HEARTBEAT,
     C_INPUT,
@@ -37,7 +38,9 @@ from protocol.messages import (
     pack_keys,
     rtt_ms,
     unpack_heartbeat_ack,
+    WELCOME,
 )
+from protocol.snapshot import unpack_snapshot
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,15 @@ class BotConfig:
     heartbeat: float = 5.0  # 0 = 不发心跳（配合服务端 --timeout 0 做纯广播基线）
     key_hold: float = 0.5  # 一个按键按住多久才换
     seed: int = 0  # 0 = 系统随机；非 0 = 可复现（第 i 个机器人用 seed+i）
+
+    # ---- 插值误差（err_px）采集：E4 / 图 6-8~6-10、6-12 ----
+    # **默认关**。它要给每一帧快照做 unpack_snapshot，那和客户端渲染是同样的开销；
+    # E2/E9 的基线都是"机器人只数帧不解析"下测的，默认打开会悄悄改变那些数据。
+    measure_err_px: bool = False
+    # **客户端侧丢包模拟**：按概率把收到的快照"当没收到"。
+    # 用途只有一个 —— 在没有 netem 的机器上验证 err_px 这把尺子是准的
+    # （无丢包应为 0 增长、丢包应单调上升）。**不能替代 E4 的真实链路**。
+    sim_loss: float = 0.0
 
 
 @dataclass
@@ -62,6 +74,8 @@ class BotResult:
     heartbeats_acked: int = 0
     rtts: list[float] = field(default_factory=list)  # 心跳 RTT（秒）
     errors: list[str] = field(default_factory=list)
+    # err_px：各机器人**自己**那一帧的插值误差（像素）。空列表 = 没开采集
+    err_track: PlayerInterp = field(default_factory=PlayerInterp)
 
 
 def _random_keys(rng: random.Random) -> int:
@@ -88,6 +102,9 @@ async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> bool:
 async def _recv_loop(
     reader: asyncio.StreamReader,
     result: BotResult,
+    config: BotConfig,
+    my_id: int,
+    rng: random.Random,
     deadline: float,
     stop: asyncio.Event,
 ) -> None:
@@ -120,6 +137,23 @@ async def _recv_loop(
                 result.intervals.append(now - last_snapshot_at)
             last_snapshot_at = now
             result.snapshots += 1
+
+            # ---- err_px 采集（默认关，见 BotConfig 的说明）----
+            if config.measure_err_px:
+                # 客户端侧丢包模拟：决定**这一帧要不要喂给插值器**。
+                # 只是不喂，帧本身照收 —— 不改变网络行为、不影响服务端。
+                if config.sim_loss <= 0.0 or rng.random() >= config.sim_loss:
+                    try:
+                        snapshot = unpack_snapshot(frame.payload)
+                    except ProtocolError as exc:
+                        result.errors.append(f"snapshot: {exc}")
+                        continue
+                    # 只跟踪**自己**：这是玩家真正看到的那一帧。跟踪全部玩家会让
+                    # 样本数 ×N，但误差在玩家间高度相关，对"显示偏差"没有额外信息。
+                    for player in snapshot.players:
+                        if player.player_id == my_id:
+                            result.err_track.ingest(now, (player.x, player.y))
+                            break
 
         elif frame.msg_type == S_HEARTBEAT_ACK:
             # 心跳是我们**发**的，但 RTT 只能靠**收到**的回包算，
@@ -216,6 +250,8 @@ async def run_bot(config: BotConfig) -> BotResult:
         if welcome is None or welcome.msg_type != S_WELCOME:
             result.errors.append("no S_WELCOME")
             return result
+        # S_WELCOME 载荷：player_id uint16 + color uint8（err_px 要跟踪"自己"）
+        my_id = WELCOME.unpack(welcome.payload)[0]
 
         # seq 是「发送方递增序号」（见 protocol/framing.py）。输入和心跳
         # **共用**一个计数器，否则两条流各自从 1 开始，服务端会看到重复的 seq。
@@ -223,7 +259,14 @@ async def run_bot(config: BotConfig) -> BotResult:
         stop = asyncio.Event()
 
         async with asyncio.TaskGroup() as tg:
-            tg.create_task(_recv_loop(reader, result, deadline, stop))
+            # 丢包模拟要用独立的随机源：不能和按键选择共用，
+            # 否则"按键更随机"会顺带改变丢包模式，两个变量就纠缠在一起了
+            tg.create_task(
+                _recv_loop(
+                    reader, result, config, my_id,
+                    random.Random((config.seed or 0) + 7_777), deadline, stop,
+                )
+            )
             if config.input_hz > 0:
                 rng = random.Random(config.seed) if config.seed else random.Random()
                 tg.create_task(
