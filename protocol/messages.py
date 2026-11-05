@@ -70,14 +70,27 @@ HEARTBEAT_ACK = struct.Struct("!II")
 # 旧服务端不会因为不认识新位就断连接（前向兼容）。
 KEY_LEFT = 0x01
 KEY_RIGHT = 0x02
+# **移动位**的集合。只有 LEFT|RIGHT 两位 —— 与步骤 11 之前完全一致，
+# `movement.keys_to_dx()` 用它把其余位掩掉。开火位故意不并进来（见下）。
 KEYS_MASK = KEY_LEFT | KEY_RIGHT
+# 开火位（步骤 11）。**故意不并进 KEYS_MASK**：
+#   · KEYS_MASK 是"移动位"的集合，`movement.keys_to_dx()` 用它把其余位掩掉；
+#   · 开火是**另一个语义**（请求服务端开火，不是移动），混进去会让
+#     `keys_to_dx` 的输入口径变味；
+#   · 而且 `tests/test_input.py` 明确断言 `KEYS_MASK == 0b11`。
+# 服务端直接读 `client.keys & KEY_FIRE`，载荷仍是 1 B（uint8），**长度不变**。
+KEY_FIRE = 0x04
 
 # 实体类型（02 §4.5）。这里只定义当前用到的值，完整表见文档。
 ENEMY_DIVE = 0x01  # 直线俯冲（占位实体用的就是它）
+ENEMY_WEAVE = 0x02  # 横向移动：落到固定高度后左右来回
+ENEMY_TRACK = 0x03  # 追踪玩家：缓慢横移靠拢（不加速）
 ENEMY_BOSS = 0xFF  # BOSS —— 用来推导快照头的 boss_present 标志
 
 BULLET_PLAYER_L1 = 0x01  # 玩家 Lv1 子弹
 BULLET_ENEMY_SPREAD = 0x11  # 敌方直线散射弹
+BULLET_ENEMY_FAN = 0x12  # 敌方扇形弹（3 发）
+BULLET_ENEMY_HOMING = 0x13  # 敌方追踪弹（朝目标方向）
 
 ITEM_POWER = 0x01  # 火力道具
 

@@ -37,6 +37,7 @@ from client.board import run_board_screen
 from client.login import LoginScreen, authenticate
 from client.fonts import load_font
 from client.net import NetworkClient
+from client.sprites_game import draw_enemy_by_type
 from client.sprites import (
     Explosion,
     draw_enemy_bullet,
@@ -48,6 +49,7 @@ from protocol.framing import ProtocolError
 from protocol.messages import (
     C_HEARTBEAT,
     C_INPUT,
+    KEY_FIRE,
     KEY_LEFT,
     KEY_RIGHT,
     S_HEARTBEAT_ACK,
@@ -134,6 +136,10 @@ def read_keys() -> int:
         keys |= KEY_LEFT
     if pressed[pygame.K_RIGHT] or pressed[pygame.K_d]:
         keys |= KEY_RIGHT
+    # 空格 = **请求开火**，不是"我来生成子弹"。
+    # 真正能不能打出来由服务端的射速（player_cd）决定（步骤 11 的边界 1）。
+    if pressed[pygame.K_SPACE]:
+        keys |= KEY_FIRE
     return keys
 
 
@@ -157,6 +163,16 @@ def parse_args() -> argparse.Namespace:
         metavar="USER:PASS",
         default="",
         help="免交互登录（自动化 / 录屏 / 截图用）：走和登录界面**同一条** HTTP 路径",
+    )
+    parser.add_argument(
+        "--shot",
+        default="",
+        help="在 --shot-after 秒时把**当前画面**存成 PNG（截图取证用）。"
+        "由客户端自己 pygame.image.save 保存，不走屏幕截屏 —— "
+        "不受窗口遮挡 / DPI 缩放 / 多窗口影响（那些坑都踩过）",
+    )
+    parser.add_argument(
+        "--shot-after", type=float, default=30.0, help="--shot 在第几秒保存，默认 30"
     )
     return parser.parse_args()
 
@@ -197,6 +213,8 @@ def main() -> None:
     screen = pygame.display.set_mode((width, height))
     pygame.display.set_caption("C/S 实时通信 · 输入 + 心跳 + 实体")
     clock = pygame.time.Clock()
+    shot_started = time.perf_counter()
+    shot_taken = False
     font = load_font(18)
     big_font = load_font(24, bold=True)
 
@@ -381,12 +399,15 @@ def main() -> None:
             # 所以形状固定朝下是对的；按 type 分形状/配色属于步骤 11 的游戏内容。
             enemy_size = max(16, int(26 * min(scale_x, scale_y)))
             for enemy in enemies:
-                draw_enemy_ship(
+                # 按 enemy.type 区分形状（步骤 11）。未知类型回落到占位形状。
+                draw_enemy_by_type(
                     screen,
                     int(enemy.x * scale_x),
                     int(enemy.y * scale_y),
                     enemy_size,
+                    enemy.type,
                     ENEMY_BODY,
+                    enemy.hp,
                 )
 
             # 击杀爆炸：**纯客户端表现**。靠"上一帧有、这一帧没了、且消失位置在屏幕中部"
@@ -461,6 +482,16 @@ def main() -> None:
                 screen.blit(text, text.get_rect(center=(width // 2, height // 2 + 40)))
 
             pygame.display.flip()
+
+            # 截图取证：由客户端自己保存**这一帧画面**。
+            # 不走 PowerShell 屏幕截屏 —— 那条路要处理窗口遮挡、DPI 缩放、
+            # 控制台抢窗，全是坑（之前 7 张截图踩遍了）。这里直接拿 surface，干净。
+            if args.shot and not shot_taken:
+                if time.perf_counter() - shot_started >= args.shot_after:
+                    pygame.image.save(screen, args.shot)
+                    shot_taken = True
+                    print(f"[client] 已保存画面：{args.shot}")
+
             clock.tick(FPS)
     finally:
         net.close()

@@ -77,6 +77,18 @@ class Enemy:
     y: int
     type: int = ENEMY_DIVE
     hp: int = 1
+    # ---------------- 以下全是**运行时字段**，步骤 11 的 GamePolicy 才用 ----------------
+    #
+    # ⚠️ 它们**不参与快照编码**：`snapshot_enemies()` 只取前 5 个字段
+    #    （enemy_id / x / y / type / hp），所以快照字节不变。
+    # ⚠️ `PlaceholderPolicy` **完全不读不写**这些字段，默认路径因此零影响。
+    #
+    # 为什么挂在实体上而不是放进 GamePolicy 的 dict：敌机被移除时要同步清理 dict，
+    # 漏了就是内存泄漏；挂在实体上随实体一起消失，省心。
+    phase: int = 0      # 0x02 的阶段：0=下落到 home_y，1=向右，2=向左
+    fire_cd: int = 0    # 距离下次开火还有几 tick（0 = 可开火）
+    home_y: int = 0     # 0x02 固守的高度（出生时随机定，之后不再变）
+    target_x: int = 0   # 0x03 当前的横向目标（每 0.5 s 重算一次，不每 tick 算）
 
 
 @dataclass(slots=True)
@@ -120,6 +132,11 @@ class PlaceholderPolicy:
     回绕是世界的状态，不该让策略碰；这样策略替换也不会影响 ID 序列。
     """
 
+    # 出生与补弹**仍由 World 自己负责**（补到恒定数量 = E9 的自变量）。
+    # GamePolicy 会把它设成 True，改成"按波次生成 + 敌机按冷却射击 + 玩家按射速开火"。
+    # 这是 World.step 里唯一的分派点，默认路径只多读一个类属性，行为一字未改。
+    manages_spawning = False
+
     def enemy_spawn(self, rng: random.Random) -> tuple[int, int]:
         """敌机从屏幕顶边进场，横向随机。**恰好一次 rng 调用。**"""
         return rng.randrange(SPAWN_MARGIN, WORLD_WIDTH - SPAWN_MARGIN), 0
@@ -154,6 +171,14 @@ class PlaceholderPolicy:
 
     def bullet_move(self, bullet: Bullet) -> tuple[int, int]:
         return angle_to_delta(bullet.angle, bullet.speed)
+
+    def score_for(self, enemy: Enemy) -> int | None:
+        """击杀这个敌机该给多少分。**返回 None 表示"用世界的默认值"**。
+
+        占位阶段一律返回 None → `World._award` 退回 `score_per_kill`（10 分），
+        与步骤 11 之前完全一致。GamePolicy 会按敌机类型给 10/20/30。
+        """
+        return None
 
 
 class World:
@@ -190,6 +215,11 @@ class World:
         self.enable_kills = enable_kills
         # 击杀后是否**立刻补满**（实验期需要数量恒定，见 D-029）
         self.fixed_entities = fixed_entities
+        # 关卡/波次：默认值刻意与快照编码器的默认值（level=1, wave=1）一致，
+        # 所以默认路径传与不传，字节完全相同（黄金基线会证明）。
+        # GamePolicy 会按实际波次更新 it。
+        self.level = 1
+        self.wave = 1
         self.scores: dict[int, int] = {}
         self.kills = 0
         self.score_per_kill = 10
@@ -207,10 +237,22 @@ class World:
 
     # ------------------------------------------------------------ 每个 tick
 
-    def step(self, players: list[tuple[int, int]]) -> None:
-        """players 是 [(player_id, x)]，玩家子弹从玩家的横向位置打出去。"""
+    def step(
+        self,
+        players: list[tuple[int, int]],
+        firing: set[int] | None = None,
+    ) -> None:
+        """players 是 [(player_id, x)]，玩家子弹从玩家的横向位置打出去。
+
+        `firing` 是**本 tick 按住开火的玩家 id 集合**，只有 `GamePolicy` 会用它
+        （服务端按自己的射速决定能不能真打出来，见 server/game_policy.py）。
+        默认路径完全忽略它，所以 `step(players)` 的旧调用一字不用改。
+        """
         self._move()
-        self._respawn(players)
+        if self.policy.manages_spawning:
+            self.policy.tick_spawn(self, players, firing or set())
+        else:
+            self._respawn(players)
 
     def _move(self) -> None:
         # 敌机条目里**没有 angle 字段**（02 §6.2）—— 竖版飞机大战的敌机都是向下，
@@ -249,13 +291,21 @@ class World:
         while len(self.bullets) < self.bullet_target:
             self.bullets.append(self._spawn_bullet(players))
 
-    def _spawn_enemy(self) -> Enemy:
-        x, y = self.policy.enemy_spawn(self.rng)
-        enemy = Enemy(enemy_id=self.next_enemy_id, x=x, y=y)
+    def new_enemy_id(self) -> int:
+        """分配一个敌机 ID（uint16，用完绕回 1）。
+
+        抽出来是为了 GamePolicy：它自己构造不同 type 的敌机，但仍要用**同一个**
+        ID 序列，否则客户端会看到重复 / 跳号的 id。纯提取，行为与之前一致。
+        """
+        enemy_id = self.next_enemy_id
         self.next_enemy_id += 1
         if self.next_enemy_id > 0xFFFF:  # enemy_id 是 uint16，绕回来
             self.next_enemy_id = 1
-        return enemy
+        return enemy_id
+
+    def _spawn_enemy(self) -> Enemy:
+        x, y = self.policy.enemy_spawn(self.rng)
+        return Enemy(enemy_id=self.new_enemy_id(), x=x, y=y)
 
     def _spawn_bullet(self, players: list[tuple[int, int]]) -> Bullet:
         """一半玩家子弹（向上）、一半敌方子弹（向下），轮流出。
@@ -337,7 +387,10 @@ class World:
                         if enemy.hp <= 0:
                             dead_enemies.add(ei)
                             killed += 1
-                            self._award(bullet.owner_id)
+                            self._award(
+                                bullet.owner_id,
+                                self.policy.score_for(enemy),
+                            )
                         break  # 一颗子弹只命中一个目标
 
         if dead_enemies:
@@ -355,10 +408,15 @@ class World:
             self._respawn(players or [])
         return hits, killed
 
-    def _award(self, player_id: int) -> None:
+    def _award(self, player_id: int, points: int | None = None) -> None:
         """加分。**必须夹到 uint16 上限**：`score` 是协议里的 uint16 字段，
-        越界会让 `struct.pack` 抛错 —— 那会像 E2 的 257 玩家一样直接搞死 tick 循环。"""
-        self.scores[player_id] = min(0xFFFF, self.scores.get(player_id, 0) + self.score_per_kill)
+        越界会让 `struct.pack` 抛错 —— 那会像 E2 的 257 玩家一样直接搞死 tick 循环。
+
+        `points` 为 None 时用 `score_per_kill`（占位路径）；GamePolicy 会按敌机类型
+        传 10/20/30。默认路径传的一定是 None，所以行为与步骤 11 之前完全一致。
+        """
+        gained = self.score_per_kill if points is None else points
+        self.scores[player_id] = min(0xFFFF, self.scores.get(player_id, 0) + gained)
 
 
 def detect_collisions(bullets: list[Bullet], enemies: list[Enemy]) -> int:

@@ -77,3 +77,5 @@ pwsh -ExecutionPolicy Bypass -File tools\capture_shots_4.ps1   # 02 认证成功
 4. **终端中文乱码 + 找不到窗口**：控制台窗口归 conhost 管（按 PID 找不到）、
    默认代码页 GBK、`cmd /c` 跑完立刻关窗口、管理员会话标题带 `Administrator:  ` 前缀
    → 全部记在 `tools/capture_shots_3.ps1` 的注释里
+
+| game-mode.png | 步骤 11 游戏模式：三波敌机（0x01/0x02/0x03）、弹幕、HUD | 720×960 | 客户端 --shot 自存 |

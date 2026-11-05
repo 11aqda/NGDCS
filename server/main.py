@@ -59,6 +59,7 @@ from protocol.encoders import ENCODER_NAMES, SnapshotEncoder, get_encoder
 from server.entities import World, detect_collisions
 from server.persistence import authenticate_token, persist_score
 from server.metrics import MetricsRecorder, write_scenario
+from protocol.messages import KEY_FIRE
 from server.movement import apply_input
 from server.stats import TickStats
 
@@ -135,6 +136,7 @@ class GameServer:
         # 让快照悄悄变小、基线无声失效。开着它，漂移会当场抛错而不是录进 CSV。
         self.fixed_entities = fixed_entities
         self.entity_drift_reported = False
+        self._last_wave = 1
         self._kills_total = 0
         # 步骤 10b：结算写库。**默认关** —— 实验期绝不能因为连库改变基线
         self.persist_scores = persist_scores
@@ -320,7 +322,13 @@ class GameServer:
 
         # 只把 `encoder.encode()` 这一步单独计时（嵌套在 ser 内，见 stats.NESTED_TIMERS）
         encode_started = time.perf_counter()
-        payload = self.encoder.encode(self.tick, players, enemies, bullets)
+        # level / wave 来自 World。**默认值刻意是 1/1，与编码器默认值相同**，
+        # 所以实验路径传与不传字节完全一致（黄金基线 SHA 为证）；
+        # 游戏模式下 world.wave 会随波次变化，HUD 因此能显示当前波次。
+        payload = self.encoder.encode(
+            self.tick, players, enemies, bullets,
+            level=self.world.level, wave=self.world.wave,
+        )
         self.stats.record_nested("encode", time.perf_counter() - encode_started)
 
         self.stats.record_snapshot(len(payload))
@@ -418,7 +426,21 @@ class GameServer:
             # ① 模拟：玩家按输入移动 + 实体移动 / 出屏剔除 / 补足数量
             self.update_players(started)
             players = [(c.player_id, c.x) for c in self.clients.values()]
-            self.world.step(players)
+            # 开火是"请求"：这里只收集**谁按住了开火**，真正能不能打出来由
+            # GamePolicy 按服务端射速（player_cd）决定。默认路径根本不看这个集合。
+            firing = {
+                c.player_id for c in self.clients.values() if c.keys & KEY_FIRE
+            }
+            self.world.step(players, firing)
+            # 游戏模式：波次切换打一行日志 —— 真实跑一局就能量出每波实际时长，
+            # 不用靠 headless 模拟推算（也方便判断"卡在第 N 波"）。默认路径不看这里。
+            if self.world.policy.manages_spawning and self.world.wave != self._last_wave:
+                self._last_wave = self.world.wave
+                print(
+                    f"[game] 进入第 {self.world.wave} 波 "
+                    f"(t={self.tick / self.tick_hz:.1f}s, "
+                    f"场上 {len(self.world.enemies)} 敌机)"
+                )
             if self.fixed_entities:
                 self._verify_entity_counts()
             sim_done = time.perf_counter()
@@ -544,6 +566,19 @@ def parse_args() -> argparse.Namespace:
         "默认关 —— 实验期绝不能因为连库改变基线",
     )
     parser.add_argument(
+        "--game-mode",
+        action="store_true",
+        help="步骤 11 游戏内容：按波次生成敌机、按类型运动与射击、玩家按射速开火。"
+        "等价于 GamePolicy + 击杀生效 + 不固定实体；与 --fixed-entities 互斥。"
+        "默认关 —— 实验路径必须走 PlaceholderPolicy",
+    )
+    parser.add_argument(
+        "--game-seed",
+        type=int,
+        default=None,
+        help="游戏模式的随机种子（固定后波次与出生点可复现），默认随机",
+    )
+    parser.add_argument(
         "--enable-kills",
         action="store_true",
         help="让击杀**真的生效**：扣血 / 死亡 / 计分 / 消耗子弹（游戏内容用）。"
@@ -554,10 +589,25 @@ def parse_args() -> argparse.Namespace:
 
 
 async def main(args: argparse.Namespace) -> None:
+    # 游戏模式与实验模式互斥：实验要"实体数恒定"（D-029），
+    # 游戏要"波次来去"，两个一起开只会让 --fixed-entities 的守卫天天误报。
+    if args.game_mode and args.fixed_entities:
+        print("[server] 参数错误：--game-mode 与 --fixed-entities 不能同时使用")
+        raise SystemExit(2)
+
+    policy = None
+    if args.game_mode:
+        from server.game_policy import GamePolicy
+
+        policy = GamePolicy(tick_hz=args.tick_hz, seed=args.game_seed)
+
     try:
         world = World(
             enemy_target=args.enemies, bullet_target=args.bullets, seed=args.seed,
-            enable_kills=args.enable_kills, fixed_entities=args.fixed_entities,
+            # 游戏模式下击杀必须生效，否则打不掉敌机、波次永远推进不了
+            enable_kills=args.enable_kills or args.game_mode,
+            fixed_entities=args.fixed_entities,
+            policy=policy,
         )
     except ValueError as exc:
         print(f"[server] 参数错误：{exc}")
@@ -592,13 +642,17 @@ async def main(args: argparse.Namespace) -> None:
     server = await asyncio.start_server(game.handle_client, HOST, args.port)
     timeout_text = f"{args.timeout:g}s" if args.timeout > 0 else "off"
     fixed_text = "on(D-029)" if args.fixed_entities else "off"
-    kills_text = "on" if args.enable_kills else "off"
+    # 游戏模式下击杀是**强制生效**的（否则打不掉敌机、波次推进不了），
+    # banner 要如实反映，不能因为用户没显式传 --enable-kills 就写 off
+    kills_text = "on" if (args.enable_kills or args.game_mode) else "off"
     persist_text = "on" if args.persist_scores else "off"
     print(
         f"[server] listening on {HOST}:{args.port} (timeout {timeout_text}, "
         f"enemies {args.enemies}, bullets {args.bullets}, seed {args.seed}, "
         f"tick {args.tick_hz} Hz, encoder {args.encoder}, "
-        f"fixed_entities {fixed_text}, kills {kills_text}, persist {persist_text})"
+        f"fixed_entities {fixed_text}, kills {kills_text}, persist {persist_text}"
+        + (f", GAME MODE on (game_seed {args.game_seed}, 波次生成)" if args.game_mode else "")
+        + ")"
     )
 
     tick_task = asyncio.create_task(game.tick_loop())

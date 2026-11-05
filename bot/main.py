@@ -129,6 +129,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--out", default="", help="把汇总写到 JSON 文件")
     parser.add_argument(
+        "--hold-fire",
+        action="store_true",
+        help="一直按住开火（步骤 11 试玩 --game-mode 用）。"
+        "默认关 —— 开火位只在游戏模式有意义，实验基线不走这条路",
+    )
+    parser.add_argument(
         "--err-px",
         action="store_true",
         help="采集插值误差 err_px（E4 / 图 6-8~6-10、6-12）。"
@@ -154,6 +160,7 @@ async def async_main(args: argparse.Namespace) -> None:
         key_hold=args.key_hold,
         seed=args.seed,
         measure_err_px=args.err_px,
+        hold_fire=args.hold_fire,
         sim_loss=max(0.0, min(1.0, args.sim_loss)),
     )
 

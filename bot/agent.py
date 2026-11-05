@@ -28,6 +28,7 @@ from protocol.interp import PlayerInterp
 from protocol.messages import (
     C_HEARTBEAT,
     C_INPUT,
+    KEY_FIRE,
     KEY_LEFT,
     KEY_RIGHT,
     S_HEARTBEAT_ACK,
@@ -51,6 +52,7 @@ class BotConfig:
     input_hz: float = 20.0  # 0 = 观察者（不发输入）
     heartbeat: float = 5.0  # 0 = 不发心跳（配合服务端 --timeout 0 做纯广播基线）
     key_hold: float = 0.5  # 一个按键按住多久才换
+    hold_fire: bool = False  # 试玩用：一直按住开火（步骤 11 的 --game-mode）
     seed: int = 0  # 0 = 系统随机；非 0 = 可复现（第 i 个机器人用 seed+i）
 
     # ---- 插值误差（err_px）采集：E4 / 图 6-8~6-10、6-12 ----
@@ -85,7 +87,8 @@ def _random_keys(rng: random.Random) -> int:
     每 key_hold 秒才换一次，期间**重复发送同一个 keys**：这正好演示了
     定频发送的冗余性（丢一帧，下一帧自动补上同样的状态）。
     """
-    return rng.choice((0, KEY_LEFT, KEY_RIGHT))
+    keys = rng.choice((0, KEY_LEFT, KEY_RIGHT))
+    return keys
 
 
 async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> bool:
@@ -187,6 +190,8 @@ async def _input_loop(
             break
         if now >= next_key_change:
             keys = _random_keys(rng)
+        if config.hold_fire:
+            keys |= KEY_FIRE  # 一直按住开火（试玩 --game-mode 用）
             next_key_change = now + config.key_hold
 
         try:
