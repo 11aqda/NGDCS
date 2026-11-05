@@ -1615,22 +1615,24 @@ RTO 量级（默认 200 ms）的额外延迟"**。
 ## D-033 Git 分支/tag 策略 + 求职版 Web 的时机（**现在不建第二仓库**）
 
 - **日期**：2026-11-04
-- **前置**：D-031（步骤 10 完成）、`thesis-baseline` tag
+- **前置**：D-031（步骤 10 完成）、`thesis-golden` tag
 
 ### 决定一：用 tag + 分支隔离"论文基线"与"游戏内容"
 
 ```
 main                 论文与实验主线（默认路径冻结）
-thesis-baseline      tag @ 35d72d7 —— 步骤 1-10 + E1/E2/E4/E5/E7/E8/E9 全部完成、
-                     黄金基线锁与实验回归检查通过
-game-dev             游戏内容分支（步骤 11），从 thesis-baseline 切出
+thesis-golden        tag @ 35d72d7 —— 步骤 1-10 + E1/E2/E4/E5/E7/E8/E9 全部完成、
+                     黄金基线锁与实验回归检查通过（**权威基线**）
+                     ⚠️ 用**轻量标签**：附注标签的 `ls-remote` 显示的是标签对象 SHA，
+                        不是 commit，曾经因此误判"tag 打错了"
+game-dev             游戏内容分支（步骤 11），从 thesis-golden 切出
 gameplay-v1          tag —— 基础游戏内容做完、测试与截图都过了才打
 portfolio            将来的求职版分支，从 gameplay-v1 切出
 ```
 
 **为什么要 tag 而不是只靠分支**：论文正文引用的是**某一组**实验数据。
 tag 把"这批数据对应的代码状态"钉死，将来代码前进也不影响论文可复现。
-`game-dev` 上再怎么改，`git switch` 回 `thesis-baseline` 就能重跑出同样的数。
+`game-dev` 上再怎么改，`git switch` 回 `thesis-golden` 就能重跑出同样的数。
 
 ### 决定二：三个 commit 必须分开
 
@@ -1682,7 +1684,7 @@ MVP 至少做实 1、2 两项，告警看时间。
 ### 代价 / 风险
 
 - **两个分支并行**：`main` 上的实验数据与 `game-dev` 的代码会逐渐分叉 ——
-  所以实验只认 `thesis-baseline`，`game-dev` 上每次提交前跑 `tools/check_experiments`
+  所以实验只认 `thesis-golden`，`game-dev` 上每次提交前跑 `tools/check_experiments`
 - **Web 拖太晚会挤占求职节奏**：需要在论文定稿后立刻排期，不能无限延期
 - **游戏内容容易膨胀**：边界已写死，超范围一律不做
 

@@ -989,8 +989,8 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 
 | 项 | 值 |
 |---|---|
-| **当前分支** | `game-dev`（从 `thesis-baseline` 切出） |
-| **论文基线 tag** | `thesis-baseline` → commit `35d72d7` |
+| **当前分支** | `game-dev`（从 `thesis-golden` 切出） |
+| **论文基线 tag** | **`thesis-golden`** → commit `35d72d7`（**权威**，轻量标签，`ls-remote` 直接显示 commit）<br>`thesis-baseline` 是同一 commit 的附注标签别名（`ls-remote` 显示的是标签对象 `0ae6adc`，容易看岔） |
 | **game-dev 最新** | `refactor: 抽出 PlaceholderPolicy`（纯重构，SHA 不变） |
 | **黄金基线 SHA256** | `7860bdb912d92c1f22f29aafc895e1e5db9cb3aec078bd8f8b5780190ab45e4a` |
 | **测试** | 主套件 **439**（原 429 + 10 策略）、Django 21，全过 |
