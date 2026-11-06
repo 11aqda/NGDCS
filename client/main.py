@@ -215,6 +215,9 @@ def main() -> None:
     clock = pygame.time.Clock()
     shot_started = time.perf_counter()
     shot_taken = False
+    # 击中反馈：自己比较前后两帧的 hp，**不需要协议支持**
+    enemy_hp: dict[int, int] = {}
+    enemy_flash: dict[int, float] = {}  # enemy_id -> 闪白结束时刻
     font = load_font(18)
     big_font = load_font(24, bold=True)
 
@@ -322,6 +325,19 @@ def main() -> None:
                     # 实体直接取最近一帧，不参与插值（原因见模块开头）
                     prev_enemies = enemies
                     enemies = snapshot.enemies
+                    _now = time.perf_counter()
+                    for _e in enemies:
+                        _old = enemy_hp.get(_e.enemy_id)
+                        # hp 变小 = 这一帧打中了 → 闪白 0.1 秒
+                        if _old is not None and _e.hp < _old:
+                            enemy_flash[_e.enemy_id] = _now + 0.10
+                        enemy_hp[_e.enemy_id] = _e.hp
+                    # 清理已消失的敌机，避免 dict 无限增长
+                    if len(enemy_hp) > len(enemies) * 2 + 16:
+                        _alive = {e.enemy_id for e in enemies}
+                        for _k in [k for k in enemy_hp if k not in _alive]:
+                            enemy_hp.pop(_k, None)
+                            enemy_flash.pop(_k, None)
                     curr_enemy_ids = {e.enemy_id for e in enemies}
                     bullets = snapshot.bullets
                     # 记住**两帧各自的到达时刻**：插值系数要用真实间隔算，
@@ -397,7 +413,7 @@ def main() -> None:
             # 敌机：矢量的"倒飞小飞机"（机体 + 两翼 + 描边 + 座舱点）。
             # 占位阶段敌机统一向下飞（协议里没有 angle 字段，方向由 type 隐含），
             # 所以形状固定朝下是对的；按 type 分形状/配色属于步骤 11 的游戏内容。
-            enemy_size = max(16, int(26 * min(scale_x, scale_y)))
+            enemy_size = max(18, int(30 * min(scale_x, scale_y)))  # 26 → 30：用户反馈判定体偏小，视觉也一起放大
             for enemy in enemies:
                 # 按 enemy.type 区分形状（步骤 11）。未知类型回落到占位形状。
                 draw_enemy_by_type(
@@ -408,6 +424,7 @@ def main() -> None:
                     enemy.type,
                     ENEMY_BODY,
                     enemy.hp,
+                    flash=now < enemy_flash.get(enemy.enemy_id, 0.0),
                 )
 
             # 击杀爆炸：**纯客户端表现**。靠"上一帧有、这一帧没了、且消失位置在屏幕中部"

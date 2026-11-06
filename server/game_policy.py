@@ -75,15 +75,15 @@ class EnemySpec:
 
 ENEMY_SPECS: dict[int, EnemySpec] = {
     ENEMY_DIVE: EnemySpec(
-        hp=1, fall_px_s=120, drift_px_s=0, fire_interval_s=1.2,
+        hp=1, fall_px_s=120, drift_px_s=0, fire_interval_s=1.35,
         bullet_type=BULLET_ENEMY_SPREAD, bullet_px_s=200, score=10,
     ),
     ENEMY_WEAVE: EnemySpec(
-        hp=2, fall_px_s=120, drift_px_s=120, fire_interval_s=1.5,
+        hp=2, fall_px_s=120, drift_px_s=120, fire_interval_s=1.85,
         bullet_type=BULLET_ENEMY_FAN, bullet_px_s=170, score=20,
     ),
     ENEMY_TRACK: EnemySpec(
-        hp=2, fall_px_s=120, drift_px_s=60, fire_interval_s=2.0,
+        hp=2, fall_px_s=120, drift_px_s=60, fire_interval_s=2.2,
         bullet_type=BULLET_ENEMY_HOMING, bullet_px_s=240, score=30,
     ),
 }
@@ -105,6 +105,19 @@ MIN_SPAWN_GAP_X = 60
 # 玩家子弹速度（px/s）与射速上限
 PLAYER_BULLET_PX_S = 600
 PLAYER_FIRE_INTERVAL_S = 0.14
+
+# 子弹从**机身外缘**打出，而不是从中心穿出来（用户反馈 2026-11-06：问题 2）
+ENEMY_MUZZLE_OFFSET = 16   # 敌机中心 → 机头下方
+PLAYER_MUZZLE_OFFSET = 18  # 玩家中心 → 机头上方
+
+# 判定半径（像素）。比视觉尺寸略小一点是游戏手感惯例，但**不能像之前 8 px 那样小**：
+# 敌机画出来 30 px 宽（视觉半径 ≈15），8 px 的判定会让"明明打中了"不算命中。
+# 占位路径不受影响（PlaceholderPolicy.collision_radius 固定返回 8，E9 基线靠它）。
+COLLISION_RADIUS_BY_TYPE: dict[int, int] = {
+    ENEMY_DIVE: 12,
+    ENEMY_WEAVE: 15,
+    ENEMY_TRACK: 13,
+}
 
 # 子弹硬上限：防止按住开火把 bullet_count 顶满
 MAX_PLAYER_BULLETS = 40
@@ -287,6 +300,10 @@ class GamePolicy(PlaceholderPolicy):
 
         return angle_to_delta(bullet.angle, bullet.speed)
 
+    def collision_radius(self, enemy: Enemy) -> int:
+        """按类型给判定半径。占位路径仍是 8（E9 的计数路径用的是那个值）。"""
+        return COLLISION_RADIUS_BY_TYPE.get(enemy.type, 12)
+
     def score_for(self, enemy: Enemy) -> int | None:
         spec = ENEMY_SPECS.get(enemy.type)
         return None if spec is None else spec.score
@@ -428,17 +445,28 @@ class GamePolicy(PlaceholderPolicy):
                 continue
 
             self._fire_bullets(world, enemy, spec)
-            enemy.fire_cd = self._duration_ticks(spec.fire_interval_s)
+            # 间隔加 ±25% 随机：不然所有敌机同一节奏，弹幕一看就是机械的
+            enemy.fire_cd = self._duration_ticks(
+                spec.fire_interval_s * self._rng.uniform(0.75, 1.25)
+            )
 
     def _fire_bullets(self, world, enemy: Enemy, spec: EnemySpec) -> None:
         speed = self._to_ticks(spec.bullet_px_s)
 
+        # 从**机头下方**射出，不从中心穿出来（视觉上像从机体里长出来一样）
+        muzzle_y = enemy.y + ENEMY_MUZZLE_OFFSET
+
+        def jitter_angle(base: int, spread: int = 8) -> int:
+            """角度加一点随机，避免弹幕呆板地一条线（用户反馈：问题 5）。"""
+            return (base + self._rng.choice((-spread, 0, spread))) & 0xFF
+
         if spec.bullet_type == BULLET_ENEMY_FAN:
-            # 扇形 3 发：112 / 128 / 144（128 = 正下）
-            for angle in (112, 128, 144):
+            # 扇形 3 发：112 / 128 / 144（128 = 正下），每发再各自抖一点角度
+            for base in (112, 128, 144):
                 world.bullets.append(
-                    Bullet(owner_id=0, x=enemy.x, y=enemy.y,
-                           type=BULLET_ENEMY_FAN, angle=angle, speed=speed)
+                    Bullet(owner_id=0, x=enemy.x, y=muzzle_y,
+                           type=BULLET_ENEMY_FAN, angle=jitter_angle(base),
+                           speed=speed)
                 )
             return
 
@@ -449,14 +477,16 @@ class GamePolicy(PlaceholderPolicy):
             elif enemy.target_x < enemy.x - 8:
                 angle = 96    # 右下
             world.bullets.append(
-                Bullet(owner_id=0, x=enemy.x, y=enemy.y,
-                       type=BULLET_ENEMY_HOMING, angle=angle, speed=speed)
+                Bullet(owner_id=0, x=enemy.x, y=muzzle_y,
+                       type=BULLET_ENEMY_HOMING, angle=jitter_angle(angle),
+                       speed=speed)
             )
             return
 
         world.bullets.append(
-            Bullet(owner_id=0, x=enemy.x, y=enemy.y,
-                   type=BULLET_ENEMY_SPREAD, angle=ANGLE_DOWN, speed=speed)
+            Bullet(owner_id=0, x=enemy.x, y=muzzle_y,
+                   type=BULLET_ENEMY_SPREAD, angle=jitter_angle(ANGLE_DOWN),
+                   speed=speed)
         )
 
     def _player_fire(self, world, players: list[tuple[int, int]], firing: set[int]) -> None:
@@ -471,7 +501,12 @@ class GamePolicy(PlaceholderPolicy):
         player_bullets = sum(1 for b in world.bullets if b.owner_id != 0)
         speed = self._to_ticks(PLAYER_BULLET_PX_S)
 
-        for player_id, x in players:
+        for player in players:
+            player_id, x = player[0], player[1]
+            # 服务端现在传 (id, x, y)；y 缺省时才退回屏幕底部的固定值
+            player_y = player[2] if len(player) > 2 else PLAYER_BULLET_SPAWN_Y
+            fire_y = player_y - PLAYER_MUZZLE_OFFSET
+
             cd = self._player_cd.get(player_id, 0)
             if cd > 0:
                 self._player_cd[player_id] = cd - 1
@@ -484,7 +519,7 @@ class GamePolicy(PlaceholderPolicy):
                 continue
 
             world.bullets.append(
-                Bullet(owner_id=player_id, x=x, y=PLAYER_BULLET_SPAWN_Y,
+                Bullet(owner_id=player_id, x=x, y=fire_y,
                        type=BULLET_PLAYER_L1, angle=ANGLE_UP, speed=speed)
             )
             player_bullets += 1

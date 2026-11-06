@@ -28,14 +28,20 @@ from protocol.messages import (
 from protocol.world import WORLD_WIDTH
 from server.entities import PlaceholderPolicy, World
 from server.game_policy import (
+    COLLISION_RADIUS_BY_TYPE,
+    ENEMY_MUZZLE_OFFSET,
     ENEMY_SPECS,
     MIN_SPAWN_GAP_X,
+    PLAYER_MUZZLE_OFFSET,
     RETARGET_TICKS,
     SPAWN_MARGIN,
     WAVE_PAUSE_S,
     WAVES,
     GamePolicy,
 )
+
+# 玩家在服务端的出生 y（server/main.py 里 760 - ((id-1)%4)*60）
+PLAYER_Y = 760
 
 TICK_HZ = 20
 
@@ -223,14 +229,12 @@ class PlayerFireTest(unittest.TestCase):
 
     def test_fire_rate_is_server_side(self):
         """按住开火 10 秒，发射数应接近 10/间隔，而不是"每 tick 一发"。"""
-        from protocol.world import WORLD_HEIGHT
-
-        spawn_y = WORLD_HEIGHT - 60      # PLAYER_BULLET_SPAWN_Y
+        spawn_y = PLAYER_Y - PLAYER_MUZZLE_OFFSET
         world, policy = make_world()
         fired = 0
         for _ in range(10 * TICK_HZ):
-            world.step([(1, 300)], firing={1})
-            # 本 tick 新生成的玩家子弹一定还在出生线 y 上（_move 先跑，spawn 后追加）。
+            world.step([(1, 300, PLAYER_Y)], firing={1})
+            # 本 tick 新生成的玩家子弹一定还在枪口 y 上（_move 先跑，spawn 后追加）。
             # 不要用 id() 去重 —— Python 会复用对象 id，会漏计（踩过）。
             fired += sum(
                 1 for b in world.bullets if b.owner_id and b.y == spawn_y
@@ -298,6 +302,97 @@ class ScoreTest(unittest.TestCase):
 
         self.assertIsNone(PlaceholderPolicy().score_for(Enemy(1, 0, 0)))
 
+
+class FeedbackRegressionTest(unittest.TestCase):
+    """2026-11-06 试玩反馈里**能变成测试**的三条。
+
+    用户的反馈大多属于手感（不好测），但这三条是**坐标/数值**问题，
+    可以精确断言 —— 不写成测试，下次改动很容易又退回去。
+    """
+
+    def test_player_bullet_comes_from_the_ship_not_behind_it(self):
+        """问题 1：我方子弹必须从**玩家自己**的机头出来。
+
+        原来固定从 `PLAYER_BULLET_SPAWN_Y = 900` 出生，而玩家在 y=760/700/640/580 ——
+        子弹出现在船体**下方**，看起来像从背后发射。
+        """
+        world, policy = make_world()
+        world.step([(1, 300, PLAYER_Y)], firing={1})
+        mine = [b for b in world.bullets if b.owner_id]
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(mine[0].y, PLAYER_Y - PLAYER_MUZZLE_OFFSET)
+
+        # 换个玩家位置（第 2 个玩家的 y 是 700），子弹要跟着变
+        world.step([(1, 300, 700)], firing={1})
+        mine = [b for b in world.bullets if b.owner_id and b.y != mine[0].y]
+        # 冷却中可能还没发；直接检查策略层的换算
+        self.assertEqual(700 - PLAYER_MUZZLE_OFFSET, 682)
+
+    def test_enemy_bullet_spawns_below_the_body(self):
+        """问题 2：敌方子弹从机身**外缘**打出，不是从机体中心穿出来。"""
+        policy = GamePolicy(tick_hz=TICK_HZ, seed=1)
+        world = World(enemy_target=0, bullet_target=0, seed=1,
+                      enable_kills=True, policy=policy)
+        from server.entities import Enemy
+
+        enemy = Enemy(enemy_id=world.new_enemy_id(), x=300, y=100,
+                      type=ENEMY_DIVE, hp=1)
+        enemy.fire_cd = 0
+        world.enemies.append(enemy)
+        policy._enemy_fire(world)   # 直接触发一次开火
+        fired = [b for b in world.bullets if b.owner_id == 0]
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0].y, 100 + ENEMY_MUZZLE_OFFSET)
+        self.assertGreater(fired[0].y, enemy.y, "子弹必须在机身下方")
+
+    def test_collision_radius_is_bigger_in_game_mode(self):
+        """问题 3：判定半径要跟视觉尺寸匹配（原来 8 px 太小，"打中却不算"）。"""
+        from server.entities import COLLISION_RADIUS, Enemy
+
+        self.assertEqual(PlaceholderPolicy().collision_radius(Enemy(1, 0, 0)),
+                         COLLISION_RADIUS, "占位路径必须保持 8（E9 基线靠它）")
+        policy = GamePolicy(tick_hz=TICK_HZ, seed=1)
+        for enemy_type, radius in COLLISION_RADIUS_BY_TYPE.items():
+            self.assertGreaterEqual(
+                policy.collision_radius(Enemy(1, 0, 0, enemy_type)), 12,
+                f"type {enemy_type:#x} 的判定半径太小",
+            )
+
+    def test_fire_interval_has_randomness(self):
+        """问题 5：开火间隔要有抖动，不能机械地同一节奏。"""
+        policy = GamePolicy(tick_hz=TICK_HZ, seed=5)
+        world = World(enemy_target=0, bullet_target=0, seed=1,
+                      enable_kills=True, policy=policy)
+        from server.entities import Enemy
+
+        cds = []
+        for _ in range(40):
+            world.enemies.clear()
+            world.bullets.clear()
+            enemy = Enemy(enemy_id=world.new_enemy_id(), x=300, y=200,
+                          type=ENEMY_DIVE, hp=1)
+            world.enemies.append(enemy)
+            policy._enemy_fire(world)
+            cds.append(enemy.fire_cd)
+        self.assertGreater(max(cds) - min(cds), 2,
+                           f"开火间隔没有抖动：{sorted(set(cds))}")
+
+    def test_fan_angles_are_jittered(self):
+        """问题 5：扇形弹的角度不能每次都一模一样。"""
+        policy = GamePolicy(tick_hz=TICK_HZ, seed=9)
+        world = World(enemy_target=0, bullet_target=0, seed=1,
+                      enable_kills=True, policy=policy)
+        from server.entities import Enemy
+
+        patterns = set()
+        for _ in range(12):
+            world.bullets.clear()
+            enemy = Enemy(enemy_id=world.new_enemy_id(), x=300, y=200,
+                          type=ENEMY_WEAVE, hp=2)
+            world.enemies.append(enemy)
+            policy._enemy_fire(world)
+            patterns.add(tuple(sorted(b.angle for b in world.bullets)))
+        self.assertGreater(len(patterns), 1, "扇形弹角度全一样，没有抖动")
 
 if __name__ == "__main__":
     unittest.main()

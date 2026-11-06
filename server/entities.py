@@ -157,7 +157,8 @@ class PlaceholderPolicy:
         所以轮换的奇偶不影响随机数序列的长度。
         """
         if want_player and players:
-            player_id, x = players[rng.randrange(len(players))]
+            # 只取前两个元素：服务端现在会传 (id, x, y)，占位路径只用 x
+            player_id, x = players[rng.randrange(len(players))][:2]
             return player_id, x, PLAYER_BULLET_SPAWN_Y, BULLET_PLAYER_L1, ANGLE_UP, BULLET_SPEED_PER_TICK
 
         return (
@@ -171,6 +172,10 @@ class PlaceholderPolicy:
 
     def bullet_move(self, bullet: Bullet) -> tuple[int, int]:
         return angle_to_delta(bullet.angle, bullet.speed)
+
+    def collision_radius(self, enemy: Enemy) -> int:
+        """判定半径。占位路径就是模块常量（8），与 E9 基线一致。"""
+        return COLLISION_RADIUS
 
     def score_for(self, enemy: Enemy) -> int | None:
         """击杀这个敌机该给多少分。**返回 None 表示"用世界的默认值"**。
@@ -363,7 +368,10 @@ class World:
         计分口径：一次击杀 `score_per_kill` 分，归**子弹的主人**（`owner_id`）。
         敌方子弹 `owner_id == 0`，不会命中敌机（它朝下飞），即使命中也不给分。
         """
-        radius = COLLISION_RADIUS
+        # 半径交给策略：占位路径返回 8（与 E9 的计数路径一致），
+        # 游戏模式返回更大的值，让"视觉上打中了"真的算打中。
+        # ⚠️ `detect_collisions()`（E9 计数路径）**必须继续用模块常量 8**，
+        # 那是历史数据的一部分，一改 E9 的 hits 就没法比了。
         hits = 0
         killed = 0
         dead_enemies: set[int] = set()
@@ -377,6 +385,10 @@ class World:
             for ei, enemy in enumerate(self.enemies):
                 if ei in dead_enemies:
                     continue
+                # 每只敌机各自取半径（0x02 / 0x03 比 0x01 大一圈）。
+                # 只在**结算路径**这么做；`detect_collisions()`（E9 计数）
+                # 继续用模块常量 8，否则 E9 的 hits 历史数据就没法比了。
+                radius = self.policy.collision_radius(enemy)
                 dx = bx - enemy.x
                 if -radius <= dx <= radius:
                     dy = by - enemy.y

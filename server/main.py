@@ -425,7 +425,9 @@ class GameServer:
 
             # ① 模拟：玩家按输入移动 + 实体移动 / 出屏剔除 / 补足数量
             self.update_players(started)
-            players = [(c.player_id, c.x) for c in self.clients.values()]
+            # 带上 y：GamePolicy 要把子弹从**玩家自己的枪口**打出来，
+            # 不能像占位路径那样固定用 900（那会在船体下方，看起来像从背后发射）。
+            players = [(c.player_id, c.x, c.y) for c in self.clients.values()]
             # 开火是"请求"：这里只收集**谁按住了开火**，真正能不能打出来由
             # GamePolicy 按服务端射速（player_cd）决定。默认路径根本不看这个集合。
             firing = {
