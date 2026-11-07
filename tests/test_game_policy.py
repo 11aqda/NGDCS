@@ -394,5 +394,59 @@ class FeedbackRegressionTest(unittest.TestCase):
             patterns.add(tuple(sorted(b.angle for b in world.bullets)))
         self.assertGreater(len(patterns), 1, "扇形弹角度全一样，没有抖动")
 
+class PlayerTupleShapeTest(unittest.TestCase):
+    """**2026-11-07 事故的回归测试**。
+
+    服务端传的玩家元组从 `(id, x)` 变成了 `(id, x, y)`，
+    但 `_retarget` 里还有一处按两个值解包 —— 只在第 3 波出现追踪机时才被调用，
+    于是无论模拟还是前两波都正常，一进第 3 波就抛 ValueError，
+    **tick 循环静默死掉**，玩家看到的是"卡在第 3 波"。
+
+    当时测试只传两元组，所以没抓到。现在两种形态都必须过。
+    """
+
+    def test_tick_spawn_accepts_two_tuples(self):
+        world, policy = make_world()
+        for _ in range(120):
+            world.step([(1, 300)])          # 旧形态
+        self.assertGreater(policy.spawned_total, 0)
+
+    def test_tick_spawn_accepts_three_tuples(self):
+        world, policy = make_world()
+        for _ in range(120):
+            world.step([(1, 300, 760)])     # 服务端现在的形态
+        self.assertGreater(policy.spawned_total, 0)
+
+    def test_retarget_works_with_both_tuple_shapes(self):
+        """直接打到 `_retarget` —— 这正是当年炸掉的那一行。"""
+        from server.entities import Enemy
+
+        for players in ([(1, 100), (2, 600)], [(1, 100, 760), (2, 600, 760)]):
+            policy = GamePolicy(tick_hz=TICK_HZ, seed=3)
+            world = World(enemy_target=0, bullet_target=0, seed=1,
+                          enable_kills=True, policy=policy)
+            enemy = Enemy(enemy_id=world.new_enemy_id(), x=150, y=100,
+                          type=ENEMY_TRACK, hp=2)
+            world.enemies.append(enemy)
+            for _ in range(RETARGET_TICKS):
+                world.step(players)
+            self.assertEqual(enemy.target_x, 100,
+                             f"players={players} 时目标算错了")
+
+    def test_retarget_runs_on_multi_player_three_tuples(self):
+        """三个玩家、带 y 的形态 —— 服务端多开时就是这样。"""
+        from server.entities import Enemy
+
+        policy = GamePolicy(tick_hz=TICK_HZ, seed=3)
+        world = World(enemy_target=0, bullet_target=0, seed=1,
+                      enable_kills=True, policy=policy)
+        enemy = Enemy(enemy_id=world.new_enemy_id(), x=500, y=100,
+                      type=ENEMY_TRACK, hp=2)
+        world.enemies.append(enemy)
+        players = [(1, 100, 760), (2, 300, 700), (3, 480, 640)]
+        for _ in range(RETARGET_TICKS):
+            world.step(players)
+        self.assertEqual(enemy.target_x, 480)
+
 if __name__ == "__main__":
     unittest.main()

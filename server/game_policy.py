@@ -113,10 +113,12 @@ PLAYER_MUZZLE_OFFSET = 18  # 玩家中心 → 机头上方
 # 判定半径（像素）。比视觉尺寸略小一点是游戏手感惯例，但**不能像之前 8 px 那样小**：
 # 敌机画出来 30 px 宽（视觉半径 ≈15），8 px 的判定会让"明明打中了"不算命中。
 # 占位路径不受影响（PlaceholderPolicy.collision_radius 固定返回 8，E9 基线靠它）。
+# 2026-11-07 再放大一档：用户仍觉得"打中不算"。
+# 子弹在判定里是**一个点**，所以这里的值要额外含子弹本身的半径（约 3 px）。
 COLLISION_RADIUS_BY_TYPE: dict[int, int] = {
-    ENEMY_DIVE: 12,
-    ENEMY_WEAVE: 15,
-    ENEMY_TRACK: 13,
+    ENEMY_DIVE: 16,
+    ENEMY_WEAVE: 19,
+    ENEMY_TRACK: 17,
 }
 
 # 子弹硬上限：防止按住开火把 bullet_count 顶满
@@ -146,9 +148,11 @@ class WaveSpec:
 
 # ⚠️ 这是唯一的波次数值来源。改完要同步 docs/13-游戏内容设计-敌机与波次.md §3。
 WAVES: tuple[WaveSpec, ...] = (
-    WaveSpec(1, ((ENEMY_DIVE, 16),), 0.85),
-    WaveSpec(2, ((ENEMY_DIVE, 9), (ENEMY_WEAVE, 8)), 0.65),
-    WaveSpec(3, ((ENEMY_DIVE, 7), (ENEMY_WEAVE, 8), (ENEMY_TRACK, 6)), 0.55),
+    # 2026-11-07：波次改成**按时间推进**（不再等清场），所以数量要按"刷多久"来配。
+    # 目标仍是单局 ~80 秒（BOSS 之后再加）。
+    WaveSpec(1, ((ENEMY_DIVE, 32),), 0.85),
+    WaveSpec(2, ((ENEMY_DIVE, 20), (ENEMY_WEAVE, 14)), 0.65),
+    WaveSpec(3, ((ENEMY_DIVE, 16), (ENEMY_WEAVE, 14), (ENEMY_TRACK, 10)), 0.55),
 )
 
 WAVE_PAUSE_S = 3.0
@@ -343,10 +347,17 @@ class GamePolicy(PlaceholderPolicy):
             return
 
         if not self._queue:
-            # 本波已全部生成 —— 等场上清空才进下一波
-            if not world.enemies:
-                self.wave_index += 1
-                self._pause_cd = WAVE_PAUSE_S
+            # 本波已全部刷出 → **不再等清场**，直接进波间倒计时。
+            # 2026-11-07 用户要求"每波持续刷新"，残余敌机会带进下一波（压力累积，更紧张）。
+            # 倒计时期间 `wave_state = 1`，客户端据此播"第 N 波"大字；开刷时置回 0。
+            if self.wave_index + 1 >= len(WAVES):
+                self.finished = True
+                world.wave_state = 0
+                return
+            self.wave_index += 1
+            self._pause_cd = WAVE_PAUSE_S
+            world.wave = WAVES[self.wave_index].wave
+            world.wave_state = 1
             return
 
         self._spawn_cd -= dt
@@ -366,6 +377,7 @@ class GamePolicy(PlaceholderPolicy):
         self._spawn_cd = 0.0            # 第一只立刻出
         self._last_spawn_x = None       # 新一波重新计算间距
         world.wave = spec.wave
+        world.wave_state = 0            # 开刷 → 撤掉"下一波"提示
 
     def _spawn_enemy(self, world, enemy_type: int, spec: WaveSpec) -> None:
         spec_enemy = ENEMY_SPECS[enemy_type]
@@ -409,28 +421,35 @@ class GamePolicy(PlaceholderPolicy):
 
     # ------------------------------------------------------------ 射击
 
-    def _retarget(self, world, players: list[tuple[int, int]]) -> None:
+    def _retarget(self, world, players) -> None:
         """`0x03` 每 `RETARGET_TICKS`（0.5 s）重算一次目标，用**平方距离**。
 
         每 tick 重算会让它在两个玩家之间来回抽搐；平方距离省掉开方。
+
+        ⚠️ `players` 的元素可能是 **(player_id, x)** 也可能带 y，即 (player_id, x, y)。
+        这里**只按 x 比**（玩家 y 固定在屏幕底部），所以一律取 `[1]`。
+
+        2026-11-07 事故：上一版写成 `_first_id, first_x = players[0]`，
+        服务端改成传三元组后当场 `ValueError`，**tick 循环静默死掉**，
+        玩家看到的现象是"打到第 3 波就卡住"。这个 bug 逃过了测试，
+        因为测试只传两元组 —— 现在测试对两种元组形态都覆盖。
         """
         if not players or self.tick_index % RETARGET_TICKS:
             return
+
+        first_x = players[0][1]
+        best_x = first_x
         for enemy in world.enemies:
             if enemy.type != ENEMY_TRACK:
                 continue
-            # ⚠️ players 的元素是 **(player_id, x)**，不是 (x, y)。
-            # 第一版写成 `px, py = players[0]`，把玩家 **id** 当成了坐标，
-            # 0x03 全在追"id=1 的位置"—— 被 test_track_target_follows_nearest_player 抓住。
-            # 玩家 y 都固定在屏幕底部，所以只按 x 比就够了。
-            _first_id, first_x = players[0]
             best_dx = (enemy.x - first_x) ** 2
             best_x = first_x
-            for other_id, ox in players[1:]:
-                dx2 = (enemy.x - ox) ** 2
+            for player in players[1:]:
+                other_x = player[1]
+                dx2 = (enemy.x - other_x) ** 2
                 if dx2 < best_dx:
                     best_dx = dx2
-                    best_x = ox
+                    best_x = other_x
             enemy.target_x = best_x
 
     def _enemy_fire(self, world) -> None:

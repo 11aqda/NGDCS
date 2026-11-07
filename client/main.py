@@ -33,6 +33,7 @@ import time
 
 import pygame
 
+from client.background import Starfield, draw_nebula
 from client.board import run_board_screen
 from client.login import LoginScreen, authenticate
 from client.fonts import load_font
@@ -95,6 +96,7 @@ ENEMY_BODY = (255, 88, 88)       # 敌机主体：正红
 ENEMY_EDGE = (150, 40, 40)       # 敌机描边：让三角从背景里立起来
 ENEMY_BULLET_COLOR = (255, 110, 70)   # 敌方子弹：橙红，朝我飞
 PLAYER_BULLET_COLOR = (120, 235, 255)  # 我方子弹：亮青，向上
+BANNER_COLOR = (255, 236, 170)   # 波次提示：暖金，与分数同色系但不抢眼
 SCORE_COLOR = (255, 214, 102)    # 分数：金
 SELF_RING = (255, 255, 255)      # 本机描边
 
@@ -202,15 +204,22 @@ def main() -> None:
     # 按屏幕的 85% 等比缩放，保证标题栏 + 窗口完整放得下。
     # ⚠️ pygame 的 current_w/h 是**逻辑像素**，150% 缩放下实际占屏会是 1.5 倍，
     # 所以不能只判"高度够不够 1000"，得按比例算。
-    avail_w = int(info.current_w * 0.85)
-    avail_h = int(info.current_h * 0.85)
-    scale = min(1.0, avail_h / WORLD_HEIGHT, avail_w / WORLD_WIDTH)
-    width = max(320, int(WORLD_WIDTH * scale))
-    height = max(426, int(WORLD_HEIGHT * scale))
+    # 画面比例：竖版 3:4 在宽屏上会显得"太长"（用户反馈"上下长了点"）。
+    # 竖直方向压到 88%，窗口因此**略宽、略短**。
+    # 世界坐标（720x960）完全不动 —— 只改渲染时的横纵缩放比。
+    # 这个游戏只有左右移动，竖直压缩 12% 的观感影响极小。
+    SHORTEN = 0.88
+    avail_w = int(info.current_w * 0.95)
+    avail_h = int(info.current_h * 0.88)
+    height = min(avail_h, int(avail_w * WORLD_HEIGHT / WORLD_WIDTH / SHORTEN))
+    height = max(426, height)
+    width = max(320, int(height * WORLD_WIDTH / WORLD_HEIGHT / SHORTEN))
     scale_x = width / WORLD_WIDTH
     scale_y = height / WORLD_HEIGHT
 
     screen = pygame.display.set_mode((width, height))
+    # 三层视差星空。纯客户端表现，不碰协议。
+    starfield = Starfield(width, height, seed=7)
     pygame.display.set_caption("C/S 实时通信 · 输入 + 心跳 + 实体")
     clock = pygame.time.Clock()
     shot_started = time.perf_counter()
@@ -220,6 +229,7 @@ def main() -> None:
     enemy_flash: dict[int, float] = {}  # enemy_id -> 闪白结束时刻
     font = load_font(18)
     big_font = load_font(24, bold=True)
+    wave_font = load_font(max(28, int(width * 0.055)), bold=True)
 
     # ---- 步骤 10c：先登录（HTTP），拿到 token 再连 TCP ----
     # 这就是长短连接分层的现场：**登录走 HTTP、对局走 TCP**，token 是两者的接口。
@@ -265,6 +275,8 @@ def main() -> None:
     curr: dict = {}
     prev_arrived_at = 0.0   # 上一帧快照的到达时刻（插值分母用）
     curr_arrived_at = 0.0   # 当前帧快照的到达时刻
+    wave = 1
+    wave_state = 0
     enemies: tuple = ()
     bullets: tuple = ()
     prev_enemies: tuple = ()   # 上一帧敌机，用来推断"哪一架被打掉了"
@@ -345,6 +357,9 @@ def main() -> None:
                     prev_arrived_at = curr_arrived_at
                     curr_arrived_at = time.perf_counter()
                     tick = snapshot.tick
+                    # 波次信息：wave_state == 1 表示"波间提示中"（服务端在停顿期间置 1）
+                    wave = snapshot.wave
+                    wave_state = snapshot.wave_state
                 elif frame.msg_type == S_HEARTBEAT_ACK:
                     client_time, _server_time = unpack_heartbeat_ack(frame.payload)
                     # 回显的 client_time 是我们自己写的，所以 RTT 不需要两端对表
@@ -391,6 +406,10 @@ def main() -> None:
 
             # 4) 绘制
             screen.fill(BG)
+            # 背景：星云垫底 + 三层视差星空（用户反馈背景太单调）
+            draw_nebula(screen, width, height)
+            starfield.update(1.0 / FPS)
+            starfield.draw(screen)
             draw_grid(screen, width, height)
 
             # 子弹：**两种子弹用不同形状**，不只靠颜色 ——
@@ -399,9 +418,10 @@ def main() -> None:
             # ⚠️ 子弹**不做插值**：子弹条目没有唯一 ID（只有 owner_id），
             # 客户端无法把这一帧的子弹和上一帧的对应起来（见 protocol/snapshot.py）。
             # 这是协议设计的结果，不是漏做 —— 要平滑只能靠外推或延迟快照缓冲。
-            bar_w = max(2, int(3 * min(scale_x, scale_y)))
-            bar_h = max(7, int(12 * min(scale_x, scale_y)))
-            dot_r = max(2, int(3 * min(scale_x, scale_y)))
+            # 子弹放大一半（用户要求）：3/12 -> 5/20，敌方弹丸 3 -> 4
+            bar_w = max(3, int(5 * min(scale_x, scale_y)))
+            bar_h = max(10, int(20 * min(scale_x, scale_y)))
+            dot_r = max(3, int(4 * min(scale_x, scale_y)))
             for bullet in bullets:
                 bx = int(bullet.x * scale_x)
                 by = int(bullet.y * scale_y)
@@ -413,7 +433,7 @@ def main() -> None:
             # 敌机：矢量的"倒飞小飞机"（机体 + 两翼 + 描边 + 座舱点）。
             # 占位阶段敌机统一向下飞（协议里没有 angle 字段，方向由 type 隐含），
             # 所以形状固定朝下是对的；按 type 分形状/配色属于步骤 11 的游戏内容。
-            enemy_size = max(18, int(30 * min(scale_x, scale_y)))  # 26 → 30：用户反馈判定体偏小，视觉也一起放大
+            enemy_size = max(26, int(58 * min(scale_x, scale_y)))  # 26 → 30：用户反馈判定体偏小，视觉也一起放大
             for enemy in enemies:
                 # 按 enemy.type 区分形状（步骤 11）。未知类型回落到占位形状。
                 draw_enemy_by_type(
@@ -447,7 +467,7 @@ def main() -> None:
                 y = lerp(old.y, player.y, alpha) * scale_y
 
                 color = PALETTE[player.color % len(PALETTE)]
-                size = max(26, int(40 * min(scale_x, scale_y)))
+                size = max(40, int(78 * min(scale_x, scale_y)))
                 draw_player_ship(
                     screen, int(x), int(y), size, color,
                     is_self=(player_id == my_id), t=pygame.time.get_ticks() / 1000.0,
@@ -497,6 +517,19 @@ def main() -> None:
             if not net.connected:
                 text = big_font.render("disconnected - ESC to quit", True, RED)
                 screen.blit(text, text.get_rect(center=(width // 2, height // 2 + 40)))
+
+            # 波间提示：服务端在停顿期间 wave_state = 1，这里播一行大字。
+            # 敌机一出来（wave_state 回 0）它就消失 —— 用户要的"出来就消失"。
+            if wave_state == 1:
+                banner = wave_font.render(f"第 {wave} 波", True, BANNER_COLOR)
+                shadow = wave_font.render(f"第 {wave} 波", True, (0, 0, 0))
+                rect = banner.get_rect(center=(width // 2, height // 2 - 40))
+                screen.blit(shadow, rect.move(3, 3))
+                screen.blit(banner, rect)
+                hint = font.render("准备…", True, DIM_TEXT)
+                screen.blit(
+                    hint, hint.get_rect(center=(width // 2, height // 2 + 20)),
+                )
 
             pygame.display.flip()
 

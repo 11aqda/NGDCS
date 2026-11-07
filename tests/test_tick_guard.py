@@ -256,5 +256,76 @@ class TickCrashReportTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("detect_collisions", text)
 
 
+class TickErrorSurvivalTest(unittest.TestCase):
+    """**2026-11-07 事故**：tick 里抛异常不能把循环弄死。
+
+    事故形态：`game_policy._retarget` 一个解包错误 → `tick_loop` 抛 ValueError →
+    asyncio 任务静默退出。进程还在、心跳照回、客户端还连着，但 tick 永不再前进，
+    玩家看到的是"打到第 3 波就卡住"。
+
+    修复后：`world.step` / 碰撞结算各自包了 try，记异常、跳过这一步、**继续出帧**。
+    """
+
+    def test_loop_survives_policy_exception(self):
+        import asyncio
+
+        import server.main as server_main
+        from server.entities import World
+
+        class _FakeWriter:
+            def write(self, data):
+                pass
+
+            async def drain(self):
+                pass
+
+            def close(self):
+                pass
+
+            def is_closing(self):
+                return False
+
+            def get_extra_info(self, name, default=None):
+                return default
+
+        class _Boom:
+            manages_spawning = True
+
+            def tick_spawn(self, world, players, firing):
+                raise ValueError("故意的")
+
+            def enemy_move(self, enemy):
+                return (0, 0)
+
+            def bullet_move(self, bullet):
+                return (0, 0)
+
+            def collision_radius(self, enemy):
+                return 8
+
+            def score_for(self, enemy):
+                return None
+
+        async def run():
+            world = World(enemy_target=0, bullet_target=0, seed=1, policy=_Boom())
+            server = server_main.GameServer(world=world, print_stats=False)
+            server.clients[1] = server_main.Client(
+                player_id=1, color=1, x=360, y=760, writer=_FakeWriter(),
+            )
+            task = asyncio.create_task(server.tick_loop())
+            await asyncio.sleep(0.5)
+            alive = not task.done()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            return alive, server.tick, server._tick_errors
+
+        alive, ticks, errors = asyncio.run(run())
+        self.assertTrue(alive, "tick 循环死了 —— 又会出现'卡在第 N 波'")
+        self.assertGreater(ticks, 5, "tick 没有继续前进")
+        self.assertGreater(errors, 0, "异常没有被记录")
+
 if __name__ == "__main__":
     unittest.main()

@@ -225,6 +225,9 @@ class World:
         # GamePolicy 会按实际波次更新 it。
         self.level = 1
         self.wave = 1
+        # 0 = 正常作战；1 = 波间"下一波"提示中（客户端据此播大字）。
+        # 默认 0 与编码器默认值一致 → 实验路径字节不变。
+        self.wave_state = 0
         self.scores: dict[int, int] = {}
         self.kills = 0
         self.score_per_kill = 10

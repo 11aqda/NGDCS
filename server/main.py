@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import traceback
 import sys
 import time
-import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -137,6 +137,7 @@ class GameServer:
         self.fixed_entities = fixed_entities
         self.entity_drift_reported = False
         self._last_wave = 1
+        self._tick_errors = 0
         self._kills_total = 0
         # 步骤 10b：结算写库。**默认关** —— 实验期绝不能因为连库改变基线
         self.persist_scores = persist_scores
@@ -328,6 +329,7 @@ class GameServer:
         payload = self.encoder.encode(
             self.tick, players, enemies, bullets,
             level=self.world.level, wave=self.world.wave,
+            wave_state=self.world.wave_state,
         )
         self.stats.record_nested("encode", time.perf_counter() - encode_started)
 
@@ -363,6 +365,26 @@ class GameServer:
             )
             # 只关 writer：真正的清理在 handle_client 的 finally
             client.writer.close()
+
+    def _note_tick_error(self, where: str) -> int:
+        """记录一次 tick 内异常：**打 traceback，但让循环继续跑**。
+
+        为什么要这样做：asyncio 任务抛异常后只会在任务被回收时提示，
+        而 `main()` 一直持有引用 —— 表现就是"服务端还活着、客户端还连着，
+        但画面永远停在某一帧"。2026-11-07 玩家就是被这个坑到的
+        （`_retarget` 解包三元组失败，第 3 波一进去 tick 循环就静默死了）。
+
+        返回 0，供调用方当作 `hits` 的默认值。
+        """
+        self._tick_errors += 1
+        # 前 3 次打完整 traceback，之后每 100 次打一行 —— 免得每 tick 刷屏
+        if self._tick_errors <= 3:
+            print(f"[server] tick 内异常（{where}），本次跳过该步骤：", file=sys.stderr)
+            traceback.print_exc()
+        elif self._tick_errors % 100 == 0:
+            print(f"[server] tick 内异常已累计 {self._tick_errors} 次（{where}）",
+                  file=sys.stderr)
+        return 0
 
     def report_stats(self, stats: dict) -> None:
         if not self.print_stats_enabled:
@@ -433,7 +455,15 @@ class GameServer:
             firing = {
                 c.player_id for c in self.clients.values() if c.keys & KEY_FIRE
             }
-            self.world.step(players, firing)
+            try:
+                self.world.step(players, firing)
+            except Exception:  # noqa: BLE001
+                # ⚠️ **2026-11-07 事故的防线**：game_policy._retarget 里一个解包错误
+                # 让 tick_loop 抛异常后**静默退出** —— 进程还在、心跳照回、客户端还连着，
+                # 只是 tick 不再前进，玩家看到的是"打到第 3 波就卡住"。
+                # 现在把模拟包起来：记下来、这一 tick 跳过模拟，但**继续出帧**，
+                # 至少画面还在动、日志里有 traceback，而不是悄无声息地死掉。
+                self._note_tick_error("世界模拟")
             # 游戏模式：波次切换打一行日志 —— 真实跑一局就能量出每波实际时长，
             # 不用靠 headless 模拟推算（也方便判断"卡在第 N 波"）。默认路径不看这里。
             if self.world.policy.manages_spawning and self.world.wave != self._last_wave:
@@ -450,16 +480,19 @@ class GameServer:
             # ② 碰撞判定：朴素 O(子弹×敌机)
             #    - 默认（--enable-kills 关）：**只判定不生效**，只数命中数（E9/E1/E2 基线）
             #    - 打开后：扣血 / 死亡 / 计分 / 消耗子弹，走 World.resolve_kills()
-            if self.world.enable_kills:
-                hits, killed = self.world.resolve_kills(players)
-                self._kills_total += killed
-                if self.fixed_entities:
-                    # **必须在这里再查一次**：击杀发生在上面那次检查之后。
-                    # 只在 step() 后查，守卫会漏掉"击杀后没补生"——而它恰恰会让
-                    # 快照字节数浮动，静默毁掉 E9 那套「逐字节等于公式」的校验。
-                    self._verify_entity_counts()
-            else:
-                hits = detect_collisions(self.world.bullets, self.world.enemies)
+            try:
+                if self.world.enable_kills:
+                    hits, killed = self.world.resolve_kills(players)
+                    self._kills_total += killed
+                    if self.fixed_entities:
+                        # **必须在这里再查一次**：击杀发生在上面那次检查之后。
+                        # 只在 step() 后查，守卫会漏掉"击杀后没补生"——而它恰恰会让
+                        # 快照字节数浮动，静默毁掉 E9 那套「逐字节等于公式」的校验。
+                        self._verify_entity_counts()
+                else:
+                    hits = detect_collisions(self.world.bullets, self.world.enemies)
+            except Exception:  # noqa: BLE001
+                hits = self._note_tick_error("碰撞结算")
             collision_done = time.perf_counter()
 
             # ③ 序列化：把几百个实体逐个 struct.pack（没人连就不做）
