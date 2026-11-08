@@ -313,7 +313,9 @@ class TickErrorSurvivalTest(unittest.TestCase):
                 player_id=1, color=1, x=360, y=760, writer=_FakeWriter(),
             )
             task = asyncio.create_task(server.tick_loop())
-            await asyncio.sleep(0.5)
+            # 睡久一点：这台机器上可能同时跑着服务端/Django，20 Hz 的循环
+            # 在负载下不一定能在 0.5 秒里跑够 tick（踩过一次闪失败）
+            await asyncio.sleep(1.2)
             alive = not task.done()
             task.cancel()
             try:
@@ -324,7 +326,8 @@ class TickErrorSurvivalTest(unittest.TestCase):
 
         alive, ticks, errors = asyncio.run(run())
         self.assertTrue(alive, "tick 循环死了 —— 又会出现'卡在第 N 波'")
-        self.assertGreater(ticks, 5, "tick 没有继续前进")
+        # 只要还在走就说明循环没死 —— 阈值放宽，避免负载下闪失败
+        self.assertGreater(ticks, 3, "tick 没有继续前进")
         self.assertGreater(errors, 0, "异常没有被记录")
 
 if __name__ == "__main__":

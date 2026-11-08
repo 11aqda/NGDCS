@@ -182,6 +182,10 @@ class GamePolicy(PlaceholderPolicy):
         self._pause_cd = 0.0
         self._last_spawn_x: int | None = None
         self.finished = False
+        # 场上没人的连续 tick 数。用来做两件事：
+        #   1) 没人时不推进波次（否则玩家还在登录界面，三波就过去了）
+        #   2) 打完空场一段时间后，下一个人进来自动重开
+        self._empty_ticks = 0
 
         # 玩家射速
         self.fire_cd_ticks = max(1, round(player_fire_interval_s * self.tick_hz))
@@ -320,11 +324,43 @@ class GamePolicy(PlaceholderPolicy):
         players: list[tuple[int, int]],
         firing: set[int],
     ) -> None:
+        # 场上没人：**冻结整个波次进程**。
+        # 不这么做的话，服务端一启动就开始刷，玩家登录（注册、输密码、连 TCP）
+        # 花掉的那几十秒里，第 1、2 波已经过去了，进去一看场上空的。
+        if not players:
+            self._empty_ticks += 1
+            return
+
+        # 上一局打完了、而且空场够久 → 有人进来就重开，不用重启服务端
+        if self.finished and self._empty_ticks > 5 * self.tick_hz:
+            self.reset(world)
+
+        self._empty_ticks = 0
         self.tick_index += 1
         self._advance_wave(world)
         self._retarget(world, players)
         self._enemy_fire(world)
         self._player_fire(world, players, firing)
+
+    def reset(self, world) -> None:
+        """重开一局：波次回到第 1 波，清掉场上残余。
+
+        `world.scores` **不清** —— 那是玩家的累计分，重开一局不该抹掉。
+        """
+        self.tick_index = 0
+        self.wave_index = 0
+        self._queue = WAVES[0].expanded() if WAVES else []
+        self._spawn_cd = 0.0
+        self._pause_cd = 0.0
+        self._last_spawn_x = None
+        self.finished = False
+        self.spawned_total = 0
+        self._player_cd.clear()
+        world.enemies.clear()
+        world.bullets.clear()
+        world.wave = WAVES[0].wave if WAVES else 1
+        world.wave_state = 0
+        print("[game] 重新开局（上一局已结束且场上无人）")
 
     # ------------------------------------------------------------ 波次
 

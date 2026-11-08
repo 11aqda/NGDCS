@@ -448,5 +448,66 @@ class PlayerTupleShapeTest(unittest.TestCase):
             world.step(players)
         self.assertEqual(enemy.target_x, 480)
 
+class LobbyTest(unittest.TestCase):
+    """没人时不能刷，打完空场后有人进来要能自动重开。
+
+    2026-11-08 踩到：服务端一启动就推进波次。玩家要先注册/登录、再连 TCP，
+    等他进来时第 1、2 波已经过去了，场上只剩空屏（截图 tick=2474、e/b=0/0）。
+    """
+
+    def test_no_players_freezes_waves(self):
+        world, policy = make_world()
+        for _ in range(200):
+            world.step([], set())
+        self.assertEqual(policy.spawned_total, 0, "没人也在刷敌机")
+        self.assertEqual(len(world.enemies), 0)
+
+    def test_waves_start_when_player_joins(self):
+        world, policy = make_world()
+        for _ in range(60):
+            world.step([], set())
+        self.assertEqual(policy.spawned_total, 0)
+
+        for _ in range(60):
+            world.step([(1, 360, 760)], firing={1})
+        self.assertGreater(policy.spawned_total, 0, "有人进来了却不开刷")
+
+    def test_restart_after_finished_and_empty(self):
+        world, policy = make_world()
+        # 打完一局
+        for _ in range(200 * TICK_HZ):
+            world.step([(1, 360, 760)], firing=set())
+            if policy.finished and not world.enemies:
+                break
+        self.assertTrue(policy.finished)
+        first_round = policy.spawned_total
+        self.assertEqual(first_round, sum(w.total for w in WAVES))
+
+        # 空场 6 秒，等于"人都退了"
+        for _ in range(6 * TICK_HZ):
+            world.step([], set())
+        self.assertEqual(len(world.enemies), 0)
+
+        # 再有人进来 → 自动重开
+        for _ in range(20):
+            world.step([(1, 360, 760)], firing={1})
+        self.assertFalse(policy.finished, "没有重开")
+        self.assertLess(policy.spawned_total, first_round)
+        self.assertGreater(policy.spawned_total, 0)
+
+    def test_reset_keeps_scores(self):
+        """重开一局**不能**抹掉累计分 —— 那是玩家跨局的战绩。"""
+        world, policy = make_world()
+        world.scores[1] = 1234
+        for _ in range(5 * TICK_HZ):
+            world.step([(1, 360, 760)], firing={1})
+        policy.finished = True
+        poworld_before = dict(world.scores)
+        for _ in range(6 * TICK_HZ):
+            world.step([], set())
+        world.step([(1, 360, 760)], firing={1})
+        self.assertEqual(world.scores, poworld_before, "重开把分数抹了")
+
+
 if __name__ == "__main__":
     unittest.main()
