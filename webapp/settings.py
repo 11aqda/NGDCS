@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",  # 直接用内置 auth_user，不自己造用户表
     "accounts",
+    "dashboard",
 ]
 
 MIDDLEWARE = [
