@@ -49,3 +49,9 @@
 - 网络损伤对比实验的扩展（`03-实验清单.md`）
 - E3 IO 模型对比的**实现**（而非纯理论对比）
 - E6 增量快照实现
+
+### 成绩表扩展字段（等游戏最终版）
+
+`ScoreRecord` 要加 `mode` / `ruleset_version` / `boss_killed` / `duration_ms`，
+**在 game-dev 上做 migration**，合并到 portfolio 后 Web 再加筛选。
+现在不改表 —— 见 D-034。
