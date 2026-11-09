@@ -40,6 +40,7 @@ ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
+    "django.contrib.sessions",
     "django.contrib.auth",  # 直接用内置 auth_user，不自己造用户表
     "accounts",
     "dashboard",
@@ -47,18 +48,30 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
 ]
 
 ROOT_URLCONF = "webapp.urls"
 WSGI_APPLICATION = "webapp.wsgi.application"
+
+LOGIN_URL = "/accounts/login/"
+LOGIN_REDIRECT_URL = "/dashboard/"
+LOGOUT_REDIRECT_URL = "/accounts/login/"
 
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
         "DIRS": [],
         "APP_DIRS": True,
-        "OPTIONS": {"context_processors": []},
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+            ]
+        },
     },
 ]
 
@@ -77,6 +90,9 @@ DATABASES = {
 # 排行榜缓存（ZSET）。Django 不缓存别的东西，只用它读写排行榜
 REDIS = {"host": "127.0.0.1", "port": 6379, "db": 0}
 LEADERBOARD_KEY = "lb:best_score"
+
+# Web 工作区读游戏端每秒写出的指标文件
+METRICS_CSV = Path("E:/PythonProject/data/server_metrics.csv")
 
 AUTH_PASSWORD_VALIDATORS = []
 LANGUAGE_CODE = "zh-hans"

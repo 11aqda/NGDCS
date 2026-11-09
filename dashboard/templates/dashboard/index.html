@@ -77,9 +77,62 @@
             width: 100%;
             height: 360px;
         }
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 12px;
+            margin-bottom: 18px;
+            color: #666;
+            font-size: 13px;
+        }
+        .topbar form {
+            margin: 0;
+        }
+        .topbar button {
+            padding: 5px 10px;
+            border: 1px solid #d5d9e0;
+            border-radius: 4px;
+            color: #555;
+            background: #fff;
+            cursor: pointer;
+        }
+        .more {
+            margin-left: 10px;
+            color: #3b5bdb;
+            font-size: 13px;
+            font-weight: normal;
+            text-decoration: none;
+        }
+        .muted {
+            margin: 10px 0 0;
+            color: #888;
+            font-size: 13px;
+        }
+        .live-tag {
+            margin-left: 8px;
+            padding: 2px 7px;
+            border-radius: 10px;
+            color: #15803d;
+            background: #e8f7ee;
+            font-size: 12px;
+            font-weight: normal;
+        }
+        .live-tag.stale {
+            color: #a16207;
+            background: #fef3c7;
+        }
     </style>
 </head>
 <body>
+    <div class="topbar">
+        <span>管理员：{{ request.user.username }}</span>
+        <form method="post" action="{% url 'logout' %}">
+            {% csrf_token %}
+            <button type="submit">退出</button>
+        </form>
+    </div>
+
     <h1>服务端数据看板</h1>
 
     <div class="cards">
@@ -101,6 +154,42 @@
         </div>
     </div>
 
+    <h2>实时状态
+        {% if live_metrics.live %}
+        <span class="live-tag">运行中</span>
+        {% else %}
+        <span class="live-tag stale">最近数据</span>
+        {% endif %}
+    </h2>
+
+    {% if live_metrics %}
+    <div class="cards">
+        <div class="card">
+            <span>在线玩家</span>
+            <strong>{{ live_metrics.online }}</strong>
+        </div>
+        <div class="card">
+            <span>tick P95</span>
+            <strong>{{ live_metrics.tick_p95|floatformat:2 }} ms</strong>
+        </div>
+        <div class="card">
+            <span>下行带宽</span>
+            <strong>{{ live_metrics.bandwidth_kbps|floatformat:1 }} KB/s</strong>
+        </div>
+        <div class="card">
+            <span>快照大小</span>
+            <strong>{{ live_metrics.snapshot_bytes }} B</strong>
+        </div>
+        <div class="card">
+            <span>CPU</span>
+            <strong>{{ live_metrics.cpu_percent|floatformat:1 }}%</strong>
+        </div>
+    </div>
+    <p class="muted">数据时间：{{ live_metrics.updated_at }}，{{ live_metrics.age }} 秒前</p>
+    {% else %}
+    <p class="muted">还没有服务端指标，先启动服务端并跑一局。</p>
+    {% endif %}
+
     <div class="chart-box">
         <h2>分数 Top 10 对比</h2>
         <div id="score-chart"></div>
@@ -111,7 +200,7 @@
         <div id="trend-chart"></div>
     </div>
 
-    <h2>分数 Top 10</h2>
+    <h2>分数 Top 10 <a class="more" href="{% url 'matches' %}">全部战绩</a></h2>
     <table>
         <thead>
             <tr>
@@ -205,6 +294,8 @@
             scoreChart.resize();
             trendChart.resize();
         });
+
+        setTimeout(() => window.location.reload(), 5000);  // 5 秒刷新实时指标
     </script>
 </body>
 </html>
