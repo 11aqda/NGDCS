@@ -981,50 +981,69 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 
 ---
 
-## 8. 交接（2026-11-04，给下一个对话）
+## 8. 交接（2026-11-09，给下一个对话）
 
-> **先读这一节，再动代码。** 当前处于"论文基线已冻结、游戏内容开发中"的状态。
+> **先读这一节，再动代码。** 当前是"游戏端在做内容、Web 端在做看板"的双线状态。
 
-### 8.1 当前状态快照
+### 8.1 目录与分支（**两个 worktree，不要来回切分支**）
+
+| 目录 | 分支 | HEAD | 谁用 |
+|---|---|---|---|
+| `E:\PythonProject` | `game-dev` | `15179a6` | **游戏端**（本对话负责） |
+| `E:\NGDCS-web` | `web-demo` | `1c07aa2` | **Web 看板**（另一个对话负责） |
+| —（不检出） | `main` | `35d72d7` | 论文基线，**不要动** |
+
+两个目录是 `git worktree` 拆出来的，共享同一个 `.git`，**各自独立工作区**。
+所以：游戏端只在 `E:\PythonProject` 干活，Web 端只在 `E:\NGDCS-web` 干活，
+**谁都不要切分支** —— 切了就会把对方的工作区换掉（2026-11-08 真踩过，
+游戏端跑起来是旧的占位代码，排查了半天）。
+
+### 8.2 当前状态
 
 | 项 | 值 |
 |---|---|
-| **当前分支** | `game-dev`（从 `thesis-golden` 切出） |
-| **论文基线 tag** | **`thesis-golden`** → commit `35d72d7`（**权威**，轻量标签，`ls-remote` 直接显示 commit）<br>`thesis-baseline` 是同一 commit 的附注标签别名（`ls-remote` 显示的是标签对象 `0ae6adc`，容易看岔） |
-| **game-dev 最新** | `refactor: 抽出 PlaceholderPolicy`（纯重构，SHA 不变） |
+| **论文基线 tag** | **`thesis-golden`** → `35d72d7`（轻量标签，`ls-remote` 直接显示 commit）<br>`thesis-baseline` 是同一 commit 的附注标签别名（显示标签对象 `0ae6adc`，容易看岔） |
 | **黄金基线 SHA256** | `7860bdb912d92c1f22f29aafc895e1e5db9cb3aec078bd8f8b5780190ab45e4a` |
-| **测试** | 主套件 **439**（原 429 + 10 策略）、Django 21，全过 |
-| **实验回归** | `tools/check_experiments` 硬 13/13、软 11/11 |
-| **实验完成度** | 7/9（E1/E2/E4/E5/E7/E8/E9 已完成；E3/E6 为可选理论讨论） |
-| **图表** | 18/20（缺 6-7、6-13，均属可选实验） |
+| **测试** | 主套件 **479**、Django 21，全过（连跑 5 次无 flaky） |
+| **实验回归** | `tools/check_experiments` 硬 13/13、软 11/11 = 24/24 |
+| **实验完成度** | 7/9（E1/E2/E4/E5/E7/E8/E9 完成；E3/E6 可选） |
+| **图表** | 18/20（缺 6-7、6-13，均为可选实验） |
+| **游戏内容** | 三波（敌机 3 型）+ 玩家射击 + **lobby**（没人不刷、打完空场自动重开）；单局 ≈ 88.8 秒 |
+| **启动脚本** | `tools/start_game.bat`（已提交）；`tools/start_dashboard.bat`（**未跟踪，用户要求先不提交**） |
 
-### 8.2 下一步（顺序不可打乱）
+### 8.3 下一步
 
 ```
-feat(game): 敌机类型 + 波次 + 运动/射击策略     ← 只走 GamePolicy / --game-mode
-     ↓
-feat(game): 关卡 + BOSS + 基础流程              ← 只走 GamePolicy
-     ↓
-测试 + 截图
-     ↓
-git tag gameplay-v1
+feat(game): 关卡 + BOSS + 基础流程
+    ├─ 3 波 → 1 个 BOSS → 通关/阵亡 → 结算 → 可重开（按 R，别让用户关客户端重进）
+    ├─ 同时给 ScoreRecord 加 4 个字段（见 D-034）：
+    │    mode / ruleset_version / boss_killed / duration_ms
+    │    默认值要兼容历史数据；duration_ms 的口径是
+    │    "第一只敌机刷出 → 最后一次结算"，不是 created_at
+    └─ 做完才验"单局 3~5 分钟"（现在 88 秒，缺 BOSS 那 60 秒）
+         ↓
+测试 + 截图 → git tag gameplay-v1
+         ↓
+（Web 稳定后）从 game-dev 开 portfolio → merge web-demo → 解决
+settings.py / urls.py 冲突 → 测试全过 → tag portfolio-v1
 ```
 
-### 8.3 ⚠️ 不要动的东西（红线）
+### 8.4 红线
 
 | 红线 | 原因 |
 |---|---|
-| **不改 `protocol/snapshot.py` 的字节布局** | 字段早已为游戏内容预留；改布局会让 E1/E2/E9 全部失效 |
-| **不改默认路径的行为** | 黄金基线 SHA 必须一直是 `7860bdb9…`；变了就先回退定位 |
-| **不把游戏内容和重构混在一个 commit** | 否则日后无法只回退游戏内容 |
-| **不随意跑 `tools/gen_golden_baseline.py`** | 它是"故意改默认行为"时才用的；用它让测试变绿是错误用法 |
-| **不新建第二个仓库 / 不复制 `.git`** | 见 D-033 的仓库策略 |
-| **现在不开发 Web** | 论文定稿后才做，见 `docs/12-求职版Web规划.md` |
+| **不改 `protocol/snapshot.py` 的字节布局** | 字段早为游戏内容预留（`level/wave/wave_state/item_count/boss_present`、敌机 `type/hp`、子弹 `type/angle`、玩家 `power/flags`、道具数组），改布局会让 E1/E2/E9 全废 |
+| **不改默认路径行为** | 黄金基线 SHA 必须一直是 `7860bdb9…`；变了先回退定位，不许"调参数让它对上" |
+| **不为 Web 提前改 `accounts/models.py`** | 见 D-034；四个字段在 BOSS 那步一起加 |
+| **不来回切分支** | 见 §8.1，两个 worktree 各管各的 |
+| **不随意跑 `tools/gen_golden_baseline.py`** | 它是"故意改默认行为"时才用的；拿它让测试变绿是错误用法 |
+| **不提交 `tools/start_dashboard.bat`** | 用户 2026-11-08 明确要求先不提交（它是 Web 端的配套） |
+| **不做 Web、不做协议改动、不合并** | 等各自稳定 |
 
-### 8.4 每次提交前要跑的三件套
+### 8.5 每次提交前跑的三件套
 
 ```powershell
-# 1) 全量测试（439 主 + 21 Django）
+# 1) 全量测试（479 主 + 21 Django）
 .venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -t .
 .venv\Scripts\python.exe -X utf8 manage.py test accounts --noinput
 
@@ -1035,9 +1054,12 @@ git tag gameplay-v1
 .venv\Scripts\python.exe -X utf8 -m tools.check_experiments
 ```
 
-### 8.5 两个求职项目的定位（面试时会问）
+游戏端冒烟：双击 `tools/start_game.bat`，登录后应立刻进入第 1 波
+（lobby 生效：没人登录时服务端不刷敌机）。
+
+### 8.6 两个求职项目的定位
 
 | 项目 | 证明什么 | 状态 |
 |---|---|---|
-| **C/S 实时对战**（本仓库） | 会写**对的**实时通信：二进制协议、asyncio、插值、压测与实验方法 | 步骤 1-10 完成，游戏内容开发中 |
-| **多人游戏服务端监控与数据分析平台**（将来 `portfolio` 分支） | 会**观测和诊断**一个系统：实时监控、历史复盘、异常告警 | **仅规划**，见 `docs/12-求职版Web规划.md` |
+| **C/S 实时对战**（`game-dev`） | 会写**对的**实时通信：二进制协议、asyncio、插值、压测与实验方法 | 三波可玩，缺 BOSS |
+| **服务端监控与数据分析平台**（`web-demo` / 将来 `portfolio`） | 会**观测和诊断**系统 | 看板雏形已提交（`1c07aa2`） |
