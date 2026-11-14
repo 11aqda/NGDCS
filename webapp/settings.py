@@ -43,6 +43,7 @@ INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.auth",  # 直接用内置 auth_user，不自己造用户表
+    "rest_framework",  # /api/v2/runs/ 只读接口（DRF）
     "accounts",
     "dashboard",
 ]
@@ -61,6 +62,22 @@ WSGI_APPLICATION = "webapp.wsgi.application"
 LOGIN_URL = "/accounts/login/"
 LOGIN_REDIRECT_URL = "/dashboard/"
 LOGOUT_REDIRECT_URL = "/accounts/login/"
+
+# DRF 默认口径：以后新增 ViewSet 忘写权限时，默认就是"仅管理员"，而不是裸奔。
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.SessionAuthentication",
+    ],
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAdminUser",
+    ],
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 20,
+    "DEFAULT_FILTER_BACKENDS": [
+        "rest_framework.filters.SearchFilter",
+        "rest_framework.filters.OrderingFilter",
+    ],
+}
 
 TEMPLATES = [
     {

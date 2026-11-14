@@ -1,0 +1,15 @@
+# NGDC S·portfolio 运行时依赖（Python 3.13）
+#
+# 安装（必须带镜像源，默认 PyPI 会卡死）：
+#   E:\PythonProject\.venv\Scripts\python.exe -m pip install -r requirements.txt ^
+#       -i https://pypi.tuna.tsinghua.edu.cn/simple --no-cache-dir --progress-bar off
+
+Django==5.2.18                 # D-002：MySQL 8.0 只兼容到 5.2 LTS
+djangorestframework==3.18.3    # /api/v2/runs/ 只读接口
+PyMySQL==1.2.3                 # MySQL 驱动（D-001：Windows 免编译）
+cryptography==50.0.2           # MySQL 8 的 caching_sha2_password 认证需要
+redis==8.1.0                   # 排行榜 ZSET + 实时指标（--live-metrics）
+psutil==7.2.2                  # 指标采集 CPU / 内存
+matplotlib==3.11.2             # tools/plot.py 出图（论文用；自带 numpy）
+pygame==2.6.1                  # 客户端渲染
+requests==2.34.2               # 工具脚本 / 接口调试
