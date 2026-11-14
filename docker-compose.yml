@@ -1,0 +1,93 @@
+# NGDC S·portfolio —— 本地 / 云服务器一键环境
+#
+#   cp .env.example .env        # 改密码和 SECRET_KEY
+#   docker compose up -d --build
+#   http://<服务器IP>/dashboard/
+#
+# 端口：80 对外（nginx）；3306 / 6379 只绑 127.0.0.1，不暴露到公网。
+services:
+  db:
+    image: mysql:8.0
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-myproject}
+      MYSQL_USER: ${MYSQL_USER:-django_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 里设置 MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 里设置 MYSQL_ROOT_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test:
+        - CMD
+        - mysqladmin
+        - ping
+        - -h
+        - "127.0.0.1"
+        - -u
+        - root
+        - -p${MYSQL_ROOT_PASSWORD}
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  web:
+    build: .
+    env_file: .env
+    environment:
+      NGDCS_DB_HOST: db
+      NGDCS_DB_PORT: "3306"
+      NGDCS_DB_NAME: ${MYSQL_DATABASE:-myproject}
+      NGDCS_DB_USER: ${MYSQL_USER:-django_user}
+      NGDCS_DB_PASSWORD: ${MYSQL_PASSWORD}
+      NGDCS_REDIS_HOST: redis
+      NGDCS_REDIS_PORT: "6379"
+      NGDCS_METRICS_CSV: /app/data/server_metrics.csv
+    volumes:
+      # 指标 CSV：宿主机 data/ 与容器共享（游戏服务端写在宿主机也可读）
+      - ./data:/app/data
+      # collectstatic 的产物，nginx 只读同一卷
+      - static:/app/staticfiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - static:/static:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  redis_data:
+  static:

@@ -1,0 +1,23 @@
+# 构建上下文里不要进镜像的东西
+.venv/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.idea/
+.cache/
+staticfiles/
+
+# 桌面端 / 实验工具（Web 镜像不需要）
+client/
+bot/
+server/
+tools/
+tests/
+legacy_game/
+data/
+docs/
+
+# 本地配置
+.env
+*.log

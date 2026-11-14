@@ -1,0 +1,8 @@
+# Web 镜像专用依赖（比 requirements.txt 小很多）：
+# 不装 pygame / matplotlib / 客户端与实验工具需要的东西。
+Django==5.2.18
+djangorestframework==3.18.3
+PyMySQL==1.2.3
+cryptography==50.0.2
+redis==8.1.0
+gunicorn==23.0.0

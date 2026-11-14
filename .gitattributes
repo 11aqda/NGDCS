@@ -1,0 +1,5 @@
+# 容器里的脚本必须是 LF，Windows 检出不能转成 CRLF
+*.sh text eol=lf
+Dockerfile text eol=lf
+deploy/nginx.conf text eol=lf
+docker-compose.yml text eol=lf

@@ -34,19 +34,34 @@ pymysql.install_as_MySQLdb()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# ⚠️ 本地开发用。生产环境必须从环境变量注入并轮换
-SECRET_KEY = "dev-only-ngdcs-secret-key-not-for-production"
-DEBUG = True
-ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+# ---- 配置：环境变量优先，默认值保持"本地开箱即用" ----
+# 本地开发什么都不设也能跑；Docker / 云服务器用 .env（见 .env.example）。
+# 生产必须设 NGDCS_SECRET_KEY 和 NGDCS_DEBUG=0。
+SECRET_KEY = os.environ.get(
+    "NGDCS_SECRET_KEY", "dev-only-ngdcs-secret-key-not-for-production"
+)
+DEBUG = os.environ.get("NGDCS_DEBUG", "1") == "1"
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.environ.get(
+        "NGDCS_ALLOWED_HOSTS", "127.0.0.1,localhost"
+    ).split(",")
+    if host.strip()
+]
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.auth",  # 直接用内置 auth_user，不自己造用户表
+    "django.contrib.staticfiles",  # nginx 托管 /static/（DRF 浏览页、登录页）
     "rest_framework",  # /api/v2/runs/ 只读接口（DRF）
     "accounts",
     "dashboard",
 ]
+
+STATIC_URL = "/static/"
+# collectstatic 的落点；compose 里 nginx 直接读这个目录
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -96,17 +111,21 @@ TEMPLATES = [
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",
-        "NAME": "myproject",
-        "USER": "django_user",
-        "PASSWORD": "123456",
-        "HOST": "127.0.0.1",
-        "PORT": "3306",
+        "NAME": os.environ.get("NGDCS_DB_NAME", "myproject"),
+        "USER": os.environ.get("NGDCS_DB_USER", "django_user"),
+        "PASSWORD": os.environ.get("NGDCS_DB_PASSWORD", "123456"),
+        "HOST": os.environ.get("NGDCS_DB_HOST", "127.0.0.1"),
+        "PORT": os.environ.get("NGDCS_DB_PORT", "3306"),
         "OPTIONS": {"charset": "utf8mb4"},
     }
 }
 
-# 排行榜缓存（ZSET）。Django 不缓存别的东西，只用它读写排行榜
-REDIS = {"host": "127.0.0.1", "port": 6379, "db": 0}
+# 排行榜缓存（ZSET）+ 实时指标。Django 不缓存别的东西，只用它读排行榜
+REDIS = {
+    "host": os.environ.get("NGDCS_REDIS_HOST", "127.0.0.1"),
+    "port": int(os.environ.get("NGDCS_REDIS_PORT", "6379")),
+    "db": 0,
+}
 LEADERBOARD_KEY = "lb:best_score"
 
 # Web 读游戏端每秒写出的指标。
