@@ -11,6 +11,8 @@
 # `cmd /c xxx.bat` 启动，按 `title` 设的标题找窗口，按窗口矩形裁剪。
 
 $ErrorActionPreference = 'Stop'
+# MySQL 密码只从环境变量来（不写进仓库）：
+if ($env:NGDCS_DB_PASSWORD) { $env:MYSQL_PWD = $env:NGDCS_DB_PASSWORD }
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
 Add-Type @"
@@ -99,7 +101,7 @@ ShotBat 'NGDCS-06-tests' @('.venv\Scripts\python.exe -X utf8 -m unittest discove
 
 # ---------- 07 MySQL + Redis ----------
 ShotBat 'NGDCS-07-db' @(
-    '"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe" -u root -p123456 -e "USE myproject; SHOW TABLES; SELECT id,username FROM auth_user LIMIT 6; SELECT user_id,score,level,kills FROM score_record ORDER BY score DESC LIMIT 6;"',
+    '"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe" -u root -e "USE myproject; SHOW TABLES; SELECT id,username FROM auth_user LIMIT 6; SELECT user_id,score,level,kills FROM score_record ORDER BY score DESC LIMIT 6;"',
     'echo.',
     'echo === Redis ZSET lb:best_score ===',
     '"D:\Tools\Redis\redis-cli.exe" ZREVRANGE lb:best_score 0 6 WITHSCORES'

@@ -79,7 +79,7 @@ def main() -> None:
     name = f"e2e{int(time.time()) % 100000}"
     response = requests.post(
         f"{args.api}/api/auth/register",
-        json={"username": name, "password": "secret123"},
+        json={"username": name, "password": "unit-test-password"},
         timeout=5,
     )
     check("注册成功", response.status_code == 201, response.text[:120])

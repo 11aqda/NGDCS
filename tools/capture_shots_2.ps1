@@ -81,7 +81,7 @@ Start-Sleep -Milliseconds 500
 
 $client = Start-Process -FilePath $py `
     -ArgumentList @('-X','utf8','-u','-m','client.main','127.0.0.1','9527',
-                    '--api','http://127.0.0.1:8000','--login','demo01:secret123') `
+                    '--api','http://127.0.0.1:8000','--login',("demo01:" + $env:NGDCS_DEMO_PASSWORD)) `
     -PassThru -WorkingDirectory 'E:\PythonProject' `
     -RedirectStandardOutput $log -RedirectStandardError 'E:\PythonProject\data\logs\shot_game_err.log'
 Start-Sleep -Seconds 7

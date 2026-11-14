@@ -145,7 +145,7 @@ ShotWindow $hWnd "$outDir\01-login.png"
 Start-Sleep -Milliseconds 400
 [Win]::Hold($VK_TAB, 90)
 Start-Sleep -Milliseconds 250
-[System.Windows.Forms.SendKeys]::SendWait("secret123")
+[System.Windows.Forms.SendKeys]::SendWait($env:NGDCS_DEMO_PASSWORD)
 Start-Sleep -Milliseconds 400
 [Win]::Hold($VK_ENTER, 90)
 Start-Sleep -Seconds 5

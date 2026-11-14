@@ -37,7 +37,7 @@ class RegisterTest(TestCase):
         )
 
     def test_success_returns_token_and_user(self):
-        response = self.post({"username": "alice", "password": "secret123"})
+        response = self.post({"username": "alice", "password": "unit-test-password"})
         self.assertEqual(response.status_code, 201)
         data = response.json()
         self.assertTrue(data["token"])
@@ -46,25 +46,25 @@ class RegisterTest(TestCase):
 
     def test_password_is_hashed_not_stored_plain(self):
         """**关键安全断言**：库里绝不能出现明文密码。"""
-        self.post({"username": "bob", "password": "secret123"})
+        self.post({"username": "bob", "password": "unit-test-password"})
         user = User.objects.get(username="bob")
-        self.assertNotEqual(user.password, "secret123")
+        self.assertNotEqual(user.password, "unit-test-password")
         self.assertTrue(user.password.startswith("pbkdf2_"))
-        self.assertTrue(user.check_password("secret123"))
+        self.assertTrue(user.check_password("unit-test-password"))
 
     def test_duplicate_username_conflicts(self):
-        self.post({"username": "carol", "password": "secret123"})
-        response = self.post({"username": "carol", "password": "secret123"})
+        self.post({"username": "carol", "password": "unit-test-password"})
+        response = self.post({"username": "carol", "password": "unit-test-password"})
         self.assertEqual(response.status_code, 409)
 
     def test_username_too_short(self):
         self.assertEqual(
-            self.post({"username": "ab", "password": "secret123"}).status_code, 400
+            self.post({"username": "ab", "password": "unit-test-password"}).status_code, 400
         )
 
     def test_username_too_long(self):
         self.assertEqual(
-            self.post({"username": "x" * 21, "password": "secret123"}).status_code, 400
+            self.post({"username": "x" * 21, "password": "unit-test-password"}).status_code, 400
         )
 
     def test_password_too_short(self):
@@ -85,7 +85,7 @@ class RegisterTest(TestCase):
 class LoginTest(TestCase):
     def setUp(self) -> None:
         self.client = Client()
-        User.objects.create_user(username="erin", password="secret123")
+        User.objects.create_user(username="erin", password="unit-test-password")
 
     def post(self, payload):
         return self.client.post(
@@ -95,13 +95,13 @@ class LoginTest(TestCase):
         )
 
     def test_success(self):
-        response = self.post({"username": "erin", "password": "secret123"})
+        response = self.post({"username": "erin", "password": "unit-test-password"})
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["token"])
 
     def test_each_login_issues_a_new_token(self):
-        first = self.post({"username": "erin", "password": "secret123"}).json()["token"]
-        second = self.post({"username": "erin", "password": "secret123"}).json()["token"]
+        first = self.post({"username": "erin", "password": "unit-test-password"}).json()["token"]
+        second = self.post({"username": "erin", "password": "unit-test-password"}).json()["token"]
         self.assertNotEqual(first, second)
         self.assertEqual(AuthToken.objects.filter(user__username="erin").count(), 2)
 

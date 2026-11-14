@@ -36,7 +36,7 @@ def get(path: str) -> requests.Response:
 name = f"tester{int(time.time()) % 100000}"
 
 print("=== 注册 ===")
-r = post("/api/auth/register", {"username": name, "password": "secret123"})
+r = post("/api/auth/register", {"username": name, "password": "unit-test-password"})
 check("注册 201", r.status_code == 201, f"实际 {r.status_code} {r.text[:120]}")
 body = r.json() if r.status_code < 300 else {}
 check("返回 token", bool(body.get("token")))
@@ -45,9 +45,9 @@ token = body.get("token", "")
 user_id = body.get("user_id", 0)
 
 print("=== 注册校验 ===")
-r = post("/api/auth/register", {"username": name, "password": "secret123"})
+r = post("/api/auth/register", {"username": name, "password": "unit-test-password"})
 check("重名 409", r.status_code == 409, f"实际 {r.status_code}")
-r = post("/api/auth/register", {"username": "ab", "password": "secret123"})
+r = post("/api/auth/register", {"username": "ab", "password": "unit-test-password"})
 check("用户名太短 400", r.status_code == 400, f"实际 {r.status_code}")
 r = post("/api/auth/register", {"username": "abcdefg", "password": "123"})
 check("密码太短 400", r.status_code == 400, f"实际 {r.status_code}")
@@ -55,7 +55,7 @@ r = requests.post(f"{BASE}/api/auth/register", data=b"not json", timeout=5)
 check("非法 JSON 400", r.status_code == 400, f"实际 {r.status_code}")
 
 print("=== 登录 ===")
-r = post("/api/auth/login", {"username": name, "password": "secret123"})
+r = post("/api/auth/login", {"username": name, "password": "unit-test-password"})
 check("登录 200", r.status_code == 200, f"实际 {r.status_code}")
 check("登录返回新 token", bool(r.json().get("token")))
 r = post("/api/auth/login", {"username": name, "password": "wrongpass"})

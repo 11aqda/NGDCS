@@ -28,19 +28,31 @@ import os
 from pathlib import Path
 
 import pymysql
+from django.core.exceptions import ImproperlyConfigured
 
 # Django 连接的驱动名固定是 MySQLdb，PyMySQL 通过这行冒充它（D-001）
 pymysql.install_as_MySQLdb()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# ---- 配置：环境变量优先，默认值保持"本地开箱即用" ----
-# 本地开发什么都不设也能跑；Docker / 云服务器用 .env（见 .env.example）。
-# 生产必须设 NGDCS_SECRET_KEY 和 NGDCS_DEBUG=0。
-SECRET_KEY = os.environ.get(
-    "NGDCS_SECRET_KEY", "dev-only-ngdcs-secret-key-not-for-production"
-)
+# 本地开发从 .env 读（.env 在 .gitignore 里，不进仓库）；容器里由 compose 注入环境变量。
+try:  # python-dotenv 是可选依赖：没有它也不影响容器/显式设置环境变量的用法
+    from dotenv import load_dotenv
+
+    load_dotenv(BASE_DIR / ".env")
+except ImportError:  # pragma: no cover
+    pass
+
 DEBUG = os.environ.get("NGDCS_DEBUG", "1") == "1"
+
+# **没有默认值**：密钥只能从环境变量 / .env 来，仓库里不留可用密钥。
+SECRET_KEY = os.environ.get("NGDCS_SECRET_KEY", "")
+if not SECRET_KEY:
+    raise ImproperlyConfigured(
+        "缺少 NGDCS_SECRET_KEY。请复制 .env.example 为 .env 并填一个随机串：\n"
+        '  python -c "import secrets; print(secrets.token_urlsafe(50))"'
+    )
+
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.environ.get(
@@ -113,7 +125,7 @@ DATABASES = {
         "ENGINE": "django.db.backends.mysql",
         "NAME": os.environ.get("NGDCS_DB_NAME", "myproject"),
         "USER": os.environ.get("NGDCS_DB_USER", "django_user"),
-        "PASSWORD": os.environ.get("NGDCS_DB_PASSWORD", "123456"),
+        "PASSWORD": os.environ.get("NGDCS_DB_PASSWORD", ""),
         "HOST": os.environ.get("NGDCS_DB_HOST", "127.0.0.1"),
         "PORT": os.environ.get("NGDCS_DB_PORT", "3306"),
         "OPTIONS": {"charset": "utf8mb4"},

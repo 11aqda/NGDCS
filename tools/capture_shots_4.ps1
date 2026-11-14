@@ -6,6 +6,8 @@
 #     这次先 `mode con: cols=115 lines=55` 把窗口撑大。
 
 $ErrorActionPreference = 'Stop'
+# MySQL 密码只从环境变量来（不写进仓库）：
+if ($env:NGDCS_DB_PASSWORD) { $env:MYSQL_PWD = $env:NGDCS_DB_PASSWORD }
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 
 Add-Type @"
@@ -88,7 +90,7 @@ ShotBat 'NGDCS-02b-auth' @('.venv\Scripts\python.exe -X utf8 -m tools.check_pers
 # ---------- 07 MySQL + Redis（窗口撑到 55 行，输出全放得下） ----------
 ShotBat 'NGDCS-07b-db' @(
     'mode con: cols=115 lines=55',
-    '"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe" -u root -p123456 -e "USE myproject; SHOW TABLES; SELECT id,username FROM auth_user; SELECT user_id,score,level,kills FROM score_record ORDER BY score DESC LIMIT 5;"',
+    '"C:\Program Files\MySQL\MySQL Server 8.0\bin\mysql.exe" -u root -e "USE myproject; SHOW TABLES; SELECT id,username FROM auth_user; SELECT user_id,score,level,kills FROM score_record ORDER BY score DESC LIMIT 5;"',
     'echo.',
     'echo === Redis ZSET lb:best_score  (ZREVRANGE 0 4 WITHSCORES) ===',
     '"D:\Tools\Redis\redis-cli.exe" ZREVRANGE lb:best_score 0 4 WITHSCORES'

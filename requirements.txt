@@ -6,6 +6,7 @@
 
 Django==5.2.18                 # D-002：MySQL 8.0 只兼容到 5.2 LTS
 djangorestframework==3.18.3    # /api/v2/runs/ 只读接口
+python-dotenv==1.2.4           # 本地从 .env 读配置（.env 不进仓库）
 PyMySQL==1.2.3                 # MySQL 驱动（D-001：Windows 免编译）
 cryptography==50.0.2           # MySQL 8 的 caching_sha2_password 认证需要
 redis==8.1.0                   # 排行榜 ZSET + 实时指标（--live-metrics）

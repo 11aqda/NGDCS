@@ -142,9 +142,9 @@ E:\PythonProject\.venv\Scripts\python.exe -m pip install matplotlib psutil -i ht
 | 数据库 | `myproject` |
 | 字符集 / 排序规则 | `utf8mb4` / `utf8mb4_unicode_ci` |
 | 应用用户 | `django_user@localhost` |
-| 用户密码 | `123456`（本地开发用，**上线前必须改**） |
+| 用户密码 | `<本地开发密码>`（见 `.env`，**上线前必须改**） |
 | 权限 | `GRANT ALL PRIVILEGES ON myproject.* TO django_user@localhost` |
-| root 密码 | `123456` |
+| root 密码 | `<本地 root 密码>` |
 | 认证插件 | `caching_sha2_password` |
 | `validate_password` | 未启用 |
 
@@ -973,7 +973,7 @@ C/S 架构 · 服务端权威同步 · 长短连接分层
 |---|---|
 | 12 | **危险操作（删除、覆盖、大改）前先说明，等用户确认** |
 | 13 | **每步先说明再执行**，不要一气呵成做十件事 |
-| 14 | 数据库密码 `123456` **仅限本地开发**，不得用于任何对外服务 |
+| 14 | 数据库密码**仅限本地开发**，不得用于任何对外服务 |
 
 ### 7.5 如果规则冲突
 

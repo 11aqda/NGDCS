@@ -94,7 +94,7 @@ class LoginScreenTest(unittest.TestCase):
     def test_success_returns_token_and_name(self):
         screen = self._screen_obj()
         screen.username = "alice"
-        screen.password = "secret123"
+        screen.password = "unit-test-password"
         fake = mock.Mock()
         fake.status_code = 201
         fake.json.return_value = {"token": "abc123", "username": "alice"}

@@ -50,7 +50,7 @@ pwsh -ExecutionPolicy Bypass -File tools\capture_shots_4.ps1   # 02 认证成功
 
 所以：
 
-- **03 游戏画面**：用 `--login demo01:secret123` 免交互登录（走**同一条** HTTP 认证路径，不是后门），
+- **03 游戏画面**：用 `--login demo01:<演示密码>` 免交互登录（走**同一条** HTTP 认证路径，不是后门），
   画面、HUD、实体全是真实运行产出。代价是**分数为 0**（没按键就动不了，打不到敌机）。
 - **04 排行榜**：用 `tools/shot_board.py` 直接调用 `client/board.py::run_board_screen()` ——
   和游戏里按 `B` 打开是**同一个函数、同一份 HTTP 数据**，像素完全一致。

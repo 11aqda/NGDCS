@@ -40,10 +40,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+# 本地 .env（数据库密码等）；没有 dotenv 包也不影响，用显式环境变量即可
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:  # pragma: no cover
+    pass
 
 from protocol.encoders import get_encoder
 from protocol.framing import FrameParser, pack_frame
@@ -360,7 +369,7 @@ def db_available() -> tuple[bool, bool]:
     try:
         import pymysql
 
-        pymysql.connect(host="127.0.0.1", user="django_user", password="123456",
+        pymysql.connect(host="127.0.0.1", user="django_user", password=os.environ.get("NGDCS_DB_PASSWORD", ""),
                         database="myproject", connect_timeout=1).close()
         mysql_ok = True
     except Exception:  # noqa: BLE001
