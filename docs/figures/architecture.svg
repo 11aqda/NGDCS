@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="720" viewBox="0 0 1100 720" font-family="'Segoe UI','Microsoft YaHei','PingFang SC',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#5b6b8c"/>
+    </marker>
+    <style>
+      .box { fill: #ffffff; stroke: #c9d2e3; stroke-width: 1.5; rx: 10; }
+      .box-accent { fill: #f5f8ff; stroke: #4b6fd6; stroke-width: 1.8; rx: 10; }
+      .box-store { fill: #fbf7f0; stroke: #c9903a; stroke-width: 1.5; rx: 10; }
+      .title { font-size: 16px; font-weight: 600; fill: #1f2a44; }
+      .sub { font-size: 12.5px; fill: #4a5675; }
+      .small { font-size: 11.5px; fill: #6b7694; }
+      .label { font-size: 12px; fill: #43507a; }
+      .line { stroke: #5b6b8c; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+      .line-plain { stroke: #9aa6c0; stroke-width: 1.4; fill: none; stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1100" height="720" fill="#f7f9fc"/>
+
+  <!-- 客户端 -->
+  <rect class="box" x="40" y="240" width="200" height="200"/>
+  <text class="title" x="140" y="276" text-anchor="middle">游戏客户端</text>
+  <text class="sub" x="140" y="302" text-anchor="middle">pygame 720×960</text>
+  <text class="sub" x="140" y="324" text-anchor="middle">非阻塞轮询 + 插值</text>
+  <text class="sub" x="140" y="346" text-anchor="middle">HUD / 排行榜 / 登录</text>
+  <text class="small" x="140" y="386" text-anchor="middle">桌面端，不作为 Web 的一部分</text>
+
+  <!-- 游戏服务端 -->
+  <rect class="box-accent" x="320" y="180" width="300" height="320"/>
+  <text class="title" x="470" y="216" text-anchor="middle">游戏服务端（asyncio）</text>
+  <text class="sub" x="340" y="248">20 Hz tick · 服务端权威同步</text>
+  <text class="sub" x="340" y="274">12 字节帧头 · 粘包 / 半包</text>
+  <text class="sub" x="340" y="300">tick 四段 sim / collision / ser / net</text>
+  <text class="sub" x="340" y="326">输入 + 心跳 + 15 s 超时</text>
+  <text class="sub" x="340" y="352">占位实体 / 游戏模式（波次）</text>
+  <text class="sub" x="340" y="378">每秒指标 → CSV（默认）</text>
+  <text class="small" x="340" y="404">--persist-scores：结算写分</text>
+  <text class="small" x="340" y="426">--live-metrics：写 Redis（默认关）</text>
+  <text class="small" x="340" y="462" fill="#6b7694">TCP :9527</text>
+
+  <!-- 客户端 ↔ 服务端 -->
+  <line class="line" x1="240" y1="300" x2="320" y2="300"/>
+  <text class="label" x="280" y="288" text-anchor="middle" font-size="11">C_INPUT</text>
+  <line class="line" x1="320" y1="380" x2="240" y2="380"/>
+  <text class="label" x="280" y="368" text-anchor="middle" font-size="11">S_SNAPSHOT</text>
+
+  <!-- Redis -->
+  <rect class="box-store" x="720" y="100" width="300" height="140"/>
+  <text class="title" x="740" y="134">Redis 5</text>
+  <text class="sub" x="740" y="160">ZSET 排行榜（lb:best_score）</text>
+  <text class="sub" x="740" y="184">Hash ngdcs:metrics:live（TTL 10 s）</text>
+  <text class="small" x="740" y="210">--live-metrics 每秒 HSET；失败不影响 tick</text>
+
+  <!-- MySQL -->
+  <rect class="box-store" x="720" y="280" width="300" height="140"/>
+  <text class="title" x="740" y="314">MySQL 8</text>
+  <text class="sub" x="740" y="340">auth_user · auth_token</text>
+  <text class="sub" x="740" y="364">score_record（对局记录）</text>
+  <text class="small" x="740" y="390">成绩只由服务端写，客户端没有上报接口</text>
+
+  <!-- 服务端 → 存储 -->
+  <line class="line" x1="620" y1="250" x2="720" y2="190"/>
+  <text class="label" x="668" y="204" text-anchor="middle" font-size="11">排行榜 / 实时指标</text>
+  <line class="line" x1="620" y1="330" x2="720" y2="350"/>
+  <text class="label" x="668" y="326" text-anchor="middle" font-size="11">结算写分</text>
+
+  <!-- Django -->
+  <rect class="box-accent" x="280" y="570" width="420" height="110"/>
+  <text class="title" x="300" y="604">Django（portfolio）:8000</text>
+  <text class="sub" x="300" y="630">/api/ 登录 · 排行榜（JsonResponse）</text>
+  <text class="sub" x="300" y="652">/api/v2/runs/ 只读（DRF + IsAdminUser）</text>
+  <text class="sub" x="300" y="674">/dashboard/ 看板 · /accounts/login/</text>
+
+  <!-- Django → 存储（只读） -->
+  <line class="line" x1="700" y1="600" x2="850" y2="420"/>
+  <text class="label" x="790" y="500" text-anchor="middle" font-size="11">ORM 只读</text>
+  <polyline class="line" points="700,668 1065,668 1065,220 1020,220"/>
+  <text class="label" x="1055" y="450" text-anchor="end" font-size="11">实时指标</text>
+
+  <!-- 浏览器 -->
+  <rect class="box" x="880" y="570" width="180" height="80"/>
+  <text class="title" x="970" y="602" text-anchor="middle">浏览器</text>
+  <text class="sub" x="970" y="626" text-anchor="middle">管理员看板</text>
+  <line class="line" x1="880" y1="610" x2="700" y2="610"/>
+  <text class="label" x="790" y="598" text-anchor="middle" font-size="11">HTTP :8000</text>
+
+  <!-- 数据文件 -->
+  <text class="small" x="40" y="500">指标 CSV：data/server_metrics.csv</text>
+  <text class="small" x="40" y="520">看板优先 Redis，读不到回退 CSV</text>
+</svg>

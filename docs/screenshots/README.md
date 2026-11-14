@@ -14,6 +14,9 @@
 | `05-server-log.png` | 服务端启动日志：监听参数、`tick loop started at 20 Hz`、`认证通过`、`结算 ... 已入库` | 服务端启动日志 |
 | `06-tests.png` | 测试通过：`Ran 366 tests in 4.728s` + `OK` | 测试结果 |
 | `07-mysql-redis.png` | MySQL 10 张表（含 `auth_user` / `auth_token` / `score_record`）+ Redis ZSET 内容 | 数据层落点 |
+| `08-dashboard.png` | 看板总览：实时指标（6 在线 / tick P95 / 带宽 / 快照 / CPU）、分数 Top 10、7 天趋势、排行榜 | Web 看板 |
+| `09-dashboard-matches.png` | 对局记录：分页 + 按玩家名搜索 | Web 看板 |
+| `10-api-runs.png` | DRF Browsable API：`/api/v2/runs/`（管理员会话，200 + 分页结果） | DRF 接口 |
 
 ## 建议放哪
 
@@ -63,6 +66,16 @@ pwsh -ExecutionPolicy Bypass -File tools\capture_shots_4.ps1   # 02 认证成功
 
 **它不是实验数据**，不参与任何图表。E1/E2/E7/E8/E9 的数据全部来自
 `data/runs/` 下的真实压测记录，和这里无关。
+
+### ③ 08–10 是三张网页截图（2026-11-14）
+
+用 `tools/shot_dashboard.py`（Edge headless + CDP）截的，数据来自真实运行：
+6 个机器人连着服务端、Redis 里是实时 Hash、图表数据来自 MySQL。
+
+- 登录走**真实表单**（临时 staff 账号，截完即删；密码只走环境变量，不落盘）
+- Edge 必须由 PowerShell `Start-Process` 启动：用 Python `subprocess` 起的 Edge
+  会在几秒内崩溃（`0xC0000409`，沙箱限制），复现命令见工具文件开头
+- 截图脚本只读页面，不改任何业务代码；`.cache\` 下的临时 profile 用完即删
 
 ## 截图过程中顺手修掉的 4 个真 bug
 
