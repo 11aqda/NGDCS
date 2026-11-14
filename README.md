@@ -128,6 +128,18 @@ cd E:\PythonProject
 > 一键脚本：`tools\start_game.bat`（服务端 + Django + 客户端），
 > `tools\start_dashboard.bat`（只起 Django 看板，带 `/dashboard/` 状态码检查）。
 
+### 演示数据（可选）
+
+看板不想是空的就灌一组演示数据（**幂等**，重复跑会重建，不会累加）：
+
+```powershell
+$env:DEMO_PASSWORD = "自己设一个"
+.\.venv\Scripts\python.exe -X utf8 manage.py seed_demo
+```
+
+生成：`demo` 管理员（staff）+ 5 个 `demo_` 玩家 + 35 条对局（铺在最近 7 天）。
+密码只从环境变量读，不写死、不打印；演示用户名带 `demo_` 前缀，一眼可辨。
+
 ---
 
 ## 6. 测试
@@ -180,6 +192,9 @@ deploy/      nginx 配置、容器入口脚本
 ```bash
 cp .env.example .env      # 改 SECRET_KEY / MySQL 密码
 docker compose up -d --build
+
+# 可选：灌演示数据（幂等）
+docker compose exec web python manage.py seed_demo
 ```
 
 服务：MySQL 8、Redis 7、Django（gunicorn）、nginx。
