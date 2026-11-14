@@ -1,0 +1,301 @@
+    <!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>服务端数据看板</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 32px;
+            color: #222;
+            font-family: "Microsoft YaHei", sans-serif;
+            background: #f5f6f8;
+        }
+        h1 {
+            margin: 0 0 24px;
+            font-size: 26px;
+        }
+        h2 {
+            margin: 32px 0 12px;
+            font-size: 18px;
+        }
+        .cards {
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .card {
+            min-width: 160px;
+            padding: 18px 20px;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, .05);
+        }
+        .card span {
+            color: #777;
+            font-size: 13px;
+        }
+        .card strong {
+            display: block;
+            margin-top: 8px;
+            font-size: 28px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #fff;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, .05);
+        }
+        th,
+        td {
+            padding: 12px 16px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        th {
+            color: #777;
+            font-size: 13px;
+            background: #fafafa;
+        }
+        tr:last-child td {
+            border-bottom: none;
+        }
+        .empty {
+            padding: 24px;
+            color: #999;
+        }
+        .chart-box {
+            margin-top: 28px;
+            padding: 16px 20px;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, .05);
+        }
+        #score-chart,
+        #trend-chart {
+            width: 100%;
+            height: 360px;
+        }
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 12px;
+            margin-bottom: 18px;
+            color: #666;
+            font-size: 13px;
+        }
+        .topbar form {
+            margin: 0;
+        }
+        .topbar button {
+            padding: 5px 10px;
+            border: 1px solid #d5d9e0;
+            border-radius: 4px;
+            color: #555;
+            background: #fff;
+            cursor: pointer;
+        }
+        .more {
+            margin-left: 10px;
+            color: #3b5bdb;
+            font-size: 13px;
+            font-weight: normal;
+            text-decoration: none;
+        }
+        .muted {
+            margin: 10px 0 0;
+            color: #888;
+            font-size: 13px;
+        }
+        .live-tag {
+            margin-left: 8px;
+            padding: 2px 7px;
+            border-radius: 10px;
+            color: #15803d;
+            background: #e8f7ee;
+            font-size: 12px;
+            font-weight: normal;
+        }
+        .live-tag.stale {
+            color: #a16207;
+            background: #fef3c7;
+        }
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <span>管理员：{{ request.user.username }}</span>
+        <form method="post" action="{% url 'logout' %}">
+            {% csrf_token %}
+            <button type="submit">退出</button>
+        </form>
+    </div>
+
+    <h1>服务端数据看板</h1>
+
+    <div class="cards">
+        <div class="card">
+            <span>用户总数</span>
+            <strong>{{ user_count }}</strong>
+        </div>
+        <div class="card">
+            <span>分数记录</span>
+            <strong>{{ stats.total|default:0 }}</strong>
+        </div>
+        <div class="card">
+            <span>最高分</span>
+            <strong>{{ stats.max_score|default:"-" }}</strong>
+        </div>
+        <div class="card">
+            <span>平均分</span>
+            <strong>{{ stats.avg_score|floatformat:1|default:"-" }}</strong>
+        </div>
+    </div>
+
+    <h2>实时状态
+        {% if live_metrics.live %}
+        <span class="live-tag">运行中</span>
+        {% else %}
+        <span class="live-tag stale">最近数据</span>
+        {% endif %}
+    </h2>
+
+    {% if live_metrics %}
+    <div class="cards">
+        <div class="card">
+            <span>在线玩家</span>
+            <strong>{{ live_metrics.online }}</strong>
+        </div>
+        <div class="card">
+            <span>tick P95</span>
+            <strong>{{ live_metrics.tick_p95|floatformat:2 }} ms</strong>
+        </div>
+        <div class="card">
+            <span>下行带宽</span>
+            <strong>{{ live_metrics.bandwidth_kbps|floatformat:1 }} KB/s</strong>
+        </div>
+        <div class="card">
+            <span>快照大小</span>
+            <strong>{{ live_metrics.snapshot_bytes }} B</strong>
+        </div>
+        <div class="card">
+            <span>CPU</span>
+            <strong>{{ live_metrics.cpu_percent|floatformat:1 }}%</strong>
+        </div>
+    </div>
+    <p class="muted">数据时间：{{ live_metrics.updated_at }}，{{ live_metrics.age }} 秒前</p>
+    {% else %}
+    <p class="muted">还没有服务端指标，先启动服务端并跑一局。</p>
+    {% endif %}
+
+    <div class="chart-box">
+        <h2>分数 Top 10 对比</h2>
+        <div id="score-chart"></div>
+    </div>
+
+    <div class="chart-box">
+        <h2>最近 7 天分数趋势</h2>
+        <div id="trend-chart"></div>
+    </div>
+
+    <h2>分数 Top 10 <a class="more" href="{% url 'matches' %}">全部战绩</a></h2>
+    <table>
+        <thead>
+            <tr>
+                <th>排名</th>
+                <th>玩家</th>
+                <th>最高分</th>
+                <th>对局次数</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for record in top_scores %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>{{ record.username }}</td>
+                <td>{{ record.best_score }}</td>
+                <td>{{ record.games }}</td>
+            </tr>
+            {% empty %}
+            <tr><td class="empty" colspan="4">暂无分数记录</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    {{ chart_names|json_script:"chart-names" }}
+    {{ chart_scores|json_script:"chart-scores" }}
+    {{ trend_days|json_script:"trend-days" }}
+    {{ trend_counts|json_script:"trend-counts" }}
+    {{ trend_avg|json_script:"trend-avg" }}
+
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+    <script>
+        const chartNames = JSON.parse(document.getElementById('chart-names').textContent);  // 玩家名
+        const chartScores = JSON.parse(document.getElementById('chart-scores').textContent);  // 分数
+        const scoreChart = echarts.init(document.getElementById('score-chart'));
+
+        scoreChart.setOption({
+            tooltip: { trigger: 'axis' },
+            grid: { left: 40, right: 20, top: 30, bottom: 50 },
+            xAxis: {
+                type: 'category',
+                data: chartNames,
+                axisLabel: { interval: 0, rotate: 30 }
+            },
+            yAxis: { type: 'value' },
+            series: [{
+                type: 'bar',
+                data: chartScores,
+                barMaxWidth: 36,
+                itemStyle: { color: '#4f7cff' },
+                label: { show: true, position: 'top' }
+            }]
+        });
+
+        const trendDays = JSON.parse(document.getElementById('trend-days').textContent);  // 日期
+        const trendCounts = JSON.parse(document.getElementById('trend-counts').textContent);  // 每天记录数
+        const trendAvg = JSON.parse(document.getElementById('trend-avg').textContent);  // 每天平均分
+        const trendChart = echarts.init(document.getElementById('trend-chart'));
+
+        trendChart.setOption({
+            tooltip: { trigger: 'axis' },
+            legend: { data: ['记录数', '平均分'] },
+            grid: { left: 40, right: 50, top: 40, bottom: 40 },
+            xAxis: {
+                type: 'category',
+                data: trendDays
+            },
+            yAxis: [
+                { type: 'value', name: '记录数' },
+                { type: 'value', name: '平均分' }
+            ],
+            series: [
+                {
+                    name: '记录数',
+                    type: 'bar',
+                    data: trendCounts,
+                    barMaxWidth: 32,
+                    itemStyle: { color: '#4f7cff' }
+                },
+                {
+                    name: '平均分',
+                    type: 'line',
+                    yAxisIndex: 1,
+                    data: trendAvg,
+                    smooth: true,
+                    itemStyle: { color: '#f59e0b' }
+                }
+            ]
+        });
+
+        window.addEventListener('resize', () => {  // 跟随窗口
+            scoreChart.resize();
+            trendChart.resize();
+        });
+
+        setTimeout(() => window.location.reload(), 5000);  // 5 秒刷新实时指标
+    </script>
+</body>
+</html>
