@@ -33,8 +33,6 @@
 - [接口](#接口)
 - [目录结构](#目录结构)
 - [部署（可选）](#部署可选)
-- [文档](#文档)
-- [说明](#说明)
 
 ---
 
@@ -50,7 +48,7 @@
 看板只读这些数据：实时指标、对局记录、Top 10、7 天趋势。
 
 **核心论点**：通信层不是瓶颈 —— E9 实验中通信占比从 73.0%（64 实体）降到 6.7%（2254 实体），
-单核 50% 的拐点约在 215 敌机 / 1720 子弹。实验记录见 [`docs/experiments/`](docs/experiments/)。
+单核 50% 的拐点约在 215 敌机 / 1720 子弹。
 
 ---
 
@@ -118,8 +116,7 @@ DRF 只读接口（管理员会话下的 Browsable API）：
 
 ![API](docs/screenshots/10-api-runs.png)
 
-游戏端截图（登录 / 游戏画面 / 排行榜 / 服务端日志 / 测试 / 数据落库）在
-[`docs/screenshots/`](docs/screenshots/README.md)。
+更多游戏端截图在 `docs/screenshots/`。
 
 ---
 
@@ -244,7 +241,7 @@ dashboard/   只读看板（视图 / 模板）
 webapp/      Django 配置与路由
 tools/       实验跑批、出图、回归检查、截图 / 录屏
 tests/       主测试套件（491）
-docs/        进度、决策、实验记录、截图、架构图
+docs/        架构图、截图、实验记录
 deploy/      nginx 配置、容器入口脚本
 ```
 
@@ -267,29 +264,4 @@ docker compose exec web python manage.py seed_demo
 - 对外只暴露 **80**；3306 / 6379 只绑 `127.0.0.1`
 - 静态文件由 nginx 从 `collectstatic` 的卷直接提供
 - 配置项全部走环境变量（`.env.example` 有清单）
-- 详细上线清单见 [`docs/16-部署清单.md`](docs/16-部署清单.md)
-
-> 当前机器没有 Docker，部署文件只做了静态校验（compose YAML 解析、`manage.py check`、`collectstatic --dry-run`）。
-
----
-
-## 文档
-
-| 文档 | 内容 |
-|---|---|
-| [`docs/PROGRESS.md`](docs/PROGRESS.md) | 项目进度、坑表、交接 |
-| [`docs/DECISIONS.md`](docs/DECISIONS.md) | 技术决策（D-001 ~ D-034） |
-| [`docs/14-求职与学习-2026-11.md`](docs/14-求职与学习-2026-11.md) | 求职主线与当前状态 |
-| [`docs/15-CS与Web项目-面试必须懂.md`](docs/15-CS与Web项目-面试必须懂.md) | 面试口径 |
-| [`docs/16-部署清单.md`](docs/16-部署清单.md) | 部署 / Redis 升级检查清单 |
-| [`docs/experiments/`](docs/experiments/) | E1 / E9 等实验记录 |
-| [`docs/screenshots/README.md`](docs/screenshots/README.md) | 截图清单与复现方法 |
-
----
-
-## 说明
-
-- 毕设代码冻结在 `thesis-golden`（`35d72d7`），本仓库主线是 `portfolio`。
-- 成绩只由服务端写；客户端没有上报接口。
-- 截图 / 演示里的 `demo01`、`demo_*` 是演示数据，通过真实写入路径产生，不参与论文实验数据。
-- 管理员密码、数据库密码只存在本地 `.env` 或环境变量里，不进入仓库。
+- 详细上线步骤见 `docs/16-部署清单.md`
