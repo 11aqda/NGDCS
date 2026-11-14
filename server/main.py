@@ -59,6 +59,7 @@ from protocol.encoders import ENCODER_NAMES, SnapshotEncoder, get_encoder
 from server.entities import World, detect_collisions
 from server.persistence import authenticate_token, persist_score
 from server.metrics import MetricsRecorder, write_scenario
+from server.live_metrics import LiveMetricsPublisher
 from protocol.messages import KEY_FIRE
 from server.movement import apply_input
 from server.stats import TickStats
@@ -579,6 +580,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-metrics", action="store_true", help="不写指标 CSV")
     parser.add_argument(
+        "--live-metrics",
+        action="store_true",
+        help="每秒把同一行指标写进 Redis Hash（ngdcs:metrics:live，TTL 10s），"
+        "供 Django 看板实时读取。默认关 —— 实验基线不碰 Redis",
+    )
+    parser.add_argument(
         "--tick-hz",
         type=int,
         default=DEFAULT_TICK_HZ,
@@ -648,9 +655,18 @@ async def main(args: argparse.Namespace) -> None:
         print(f"[server] 参数错误：{exc}")
         raise SystemExit(2) from exc
 
+    live = None
+    if args.live_metrics and not args.no_metrics:
+        # 默认关；开了才连 Redis。写入走 LiveMetricsPublisher 的后台队列，
+        # 不阻塞 tick（tick 里只做 put_nowait）。
+        live = LiveMetricsPublisher()
+        live.start()
+    elif args.live_metrics:
+        print("[server] --live-metrics 需要每秒指标窗口，--no-metrics 下不会写 Redis")
+
     metrics = None
     if not args.no_metrics:
-        metrics = MetricsRecorder(args.metrics, scenario_id=args.scenario)
+        metrics = MetricsRecorder(args.metrics, scenario_id=args.scenario, live=live)
         if args.scenario:
             write_scenario(
                 Path(args.metrics).with_name("server_scenario.csv"),
@@ -681,11 +697,13 @@ async def main(args: argparse.Namespace) -> None:
     # banner 要如实反映，不能因为用户没显式传 --enable-kills 就写 off
     kills_text = "on" if (args.enable_kills or args.game_mode) else "off"
     persist_text = "on" if args.persist_scores else "off"
+    live_text = "on" if live is not None else "off"
     print(
         f"[server] listening on {HOST}:{args.port} (timeout {timeout_text}, "
         f"enemies {args.enemies}, bullets {args.bullets}, seed {args.seed}, "
         f"tick {args.tick_hz} Hz, encoder {args.encoder}, "
-        f"fixed_entities {fixed_text}, kills {kills_text}, persist {persist_text}"
+        f"fixed_entities {fixed_text}, kills {kills_text}, persist {persist_text}, "
+        f"live_metrics {live_text}"
         + (f", GAME MODE on (game_seed {args.game_seed}, 波次生成)" if args.game_mode else "")
         + ")"
     )
@@ -706,6 +724,8 @@ async def main(args: argparse.Namespace) -> None:
             pass  # 已经在 report_tick_crash 里报过一次，不重复刷屏
         if metrics is not None:
             metrics.close()
+        if live is not None:
+            await live.stop()
 
 
 if __name__ == "__main__":

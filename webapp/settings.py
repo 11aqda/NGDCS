@@ -24,6 +24,7 @@ MySQL 8.0.41 的库 `myproject`，用 **PyMySQL** 驱动（D-001：Windows 上�
 密码是**本地开发用**，上线前必须改（仓库为私有，见 PROGRESS §2.2）。
 """
 
+import os
 from pathlib import Path
 
 import pymysql
@@ -91,8 +92,16 @@ DATABASES = {
 REDIS = {"host": "127.0.0.1", "port": 6379, "db": 0}
 LEADERBOARD_KEY = "lb:best_score"
 
-# Web 工作区读游戏端每秒写出的指标文件
-METRICS_CSV = Path("E:/PythonProject/data/server_metrics.csv")
+# Web 读游戏端每秒写出的指标。
+# 默认读本工作区 data/；论文工作区跑服务端时用环境变量指过去（14 §11.10）。
+METRICS_CSV = Path(
+    os.environ.get("NGDCS_METRICS_CSV") or BASE_DIR / "data" / "server_metrics.csv"
+)
+
+# 实时指标（服务端 --live-metrics 写 Redis Hash，TTL 10 秒）。
+# 看板优先读它；读不到 / 过期 / 连不上就回退到 CSV 最后一行。
+LIVE_METRICS_KEY = "ngdcs:metrics:live"
+LIVE_METRICS_TTL = 10
 
 AUTH_PASSWORD_VALIDATORS = []
 LANGUAGE_CODE = "zh-hans"

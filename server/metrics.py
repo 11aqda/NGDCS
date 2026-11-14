@@ -193,16 +193,22 @@ def cpu_percent_from_deltas(delta_cpu_s: float, delta_wall_s: float) -> float:
 
 
 class MetricsRecorder:
-    """每秒写一行服务端指标。"""
+    """每秒写一行服务端指标。
+
+    `live` 可选（`--live-metrics`）：同一行数据同时投递给 Redis 发布器，
+    这样 CSV 与 Redis 的字段**天然一致**，不会出现两套口径。
+    """
 
     def __init__(
         self,
         path: str | Path,
         scenario_id: str = "",
         enable_process_stats: bool = True,
+        live=None,
     ) -> None:
         self.path = Path(path)
         self.scenario_id = scenario_id or "adhoc"
+        self.live = live
         self._t0 = time.monotonic()
 
         self._process = None
@@ -252,39 +258,42 @@ class MetricsRecorder:
         enemies: int,
         bullets: int,
         stats: dict,
-    ) -> None:
-        """把 `TickStats.flush()` 的结果加上环境信息写成一行。"""
+    ) -> dict:
+        """把 `TickStats.flush()` 的结果加上环境信息写成一行，并返回该行。"""
         cpu, cpu_seconds, mem_mb = self._sample_process()
-        self._writer.writerow(
-            {
-                "timestamp": _wall_clock(),
-                "t_mono": round(time.monotonic() - self._t0, 3),
-                "scenario_id": self.scenario_id,
-                "client_count": client_count,
-                "enemies": enemies,
-                "bullets": bullets,
-                "tick_ms_avg": stats["avg_ms"],
-                "tick_ms_p95": stats["p95_ms"],
-                "tick_ms_max": stats["max_ms"],
-                "sim_ms": stats["sim_ms"],
-                "collision_ms": stats["collision_ms"],
-                "ser_ms": stats["ser_ms"],
-                "net_ms": stats["net_ms"],
-                # 嵌套在 ser 内的细分（不参与四段相加）：E1 的图 6-2 用它
-                "encode_ms": stats["encode_ms"],
-                "hits": stats["hits"],
-                "snapshot_bytes": stats["snapshot_bytes"],
-                "cpu_percent": cpu,
-                "cpu_seconds": cpu_seconds,
-                "mem_mb": mem_mb,
-                "packets_out": stats["packets_out"],
-                "bytes_out": stats["bytes_out"],
-                "packets_in": stats["packets_in"],
-                "bytes_in": stats["bytes_in"],
-            }
-        )
+        row = {
+            "timestamp": _wall_clock(),
+            "t_mono": round(time.monotonic() - self._t0, 3),
+            "scenario_id": self.scenario_id,
+            "client_count": client_count,
+            "enemies": enemies,
+            "bullets": bullets,
+            "tick_ms_avg": stats["avg_ms"],
+            "tick_ms_p95": stats["p95_ms"],
+            "tick_ms_max": stats["max_ms"],
+            "sim_ms": stats["sim_ms"],
+            "collision_ms": stats["collision_ms"],
+            "ser_ms": stats["ser_ms"],
+            "net_ms": stats["net_ms"],
+            # 嵌套在 ser 内的细分（不参与四段相加）：E1 的图 6-2 用它
+            "encode_ms": stats["encode_ms"],
+            "hits": stats["hits"],
+            "snapshot_bytes": stats["snapshot_bytes"],
+            "cpu_percent": cpu,
+            "cpu_seconds": cpu_seconds,
+            "mem_mb": mem_mb,
+            "packets_out": stats["packets_out"],
+            "bytes_out": stats["bytes_out"],
+            "packets_in": stats["packets_in"],
+            "bytes_in": stats["bytes_in"],
+        }
+        self._writer.writerow(row)
         # 每行都 flush：实验中途被 Ctrl+C 也不会丢掉已经采到的数据
         self._handle.flush()
+        # CSV 与 Redis 用同一份 row，避免两套口径（--live-metrics 默认关）
+        if self.live is not None:
+            self.live.publish(row)
+        return row
 
     def close(self) -> None:
         try:

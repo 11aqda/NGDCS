@@ -13,7 +13,8 @@ from django.shortcuts import render
 from accounts.models import ScoreRecord
 
 
-def _latest_metrics():
+def _csv_metrics():
+    """回退路径：读 CSV 最后一行。"""
     path = settings.METRICS_CSV
     if not path.exists():
         return None
@@ -37,9 +38,79 @@ def _latest_metrics():
             "updated_at": last.get("timestamp", ""),
             "age": age,
             "live": age <= 5,
+            "source": "csv",
         }
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+def _parse_live_metrics(data: dict) -> dict | None:
+    """Redis Hash → 看板字典。
+
+    时间戳太旧（超过 TTL）就当没有：TTL 负责"服务端停了 key 自动消失"，
+    这里再兜一层，防止 key 被别的东西续了命却写的是旧数据。
+    """
+    if not data:
+        return None
+    try:
+        updated_at = datetime.fromisoformat(data["timestamp"])
     except (KeyError, ValueError):
         return None
+
+    age = max(0, int((datetime.now() - updated_at).total_seconds()))
+    ttl = getattr(settings, "LIVE_METRICS_TTL", 10)
+    if age > ttl:
+        return None
+
+    try:
+        return {
+            "online": int(float(data.get("client_count") or 0)),
+            "tick_p95": float(data.get("tick_ms_p95") or 0),
+            "bandwidth_kbps": float(data.get("bytes_out") or 0) / 1024,
+            "snapshot_bytes": int(float(data.get("snapshot_bytes") or 0)),
+            "cpu_percent": float(data.get("cpu_percent") or 0),
+            "updated_at": data.get("timestamp", ""),
+            "age": age,
+            "live": age <= 5,
+            "source": "redis",
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _redis_client():
+    """看板专用的短超时客户端：Redis 挂了也不能让页面卡住。
+
+    `protocol=2`：本机 Redis 5.0.14 不支持 RESP3 的 `HELLO`，
+    redis-py 8.x 默认发 `HELLO 3` 会直接报 "unknown command 'HELLO'"（见 live_metrics.py）。
+    """
+    import redis
+
+    return redis.Redis(
+        host=settings.REDIS["host"],
+        port=settings.REDIS["port"],
+        db=settings.REDIS["db"],
+        socket_connect_timeout=0.3,
+        socket_timeout=0.3,
+        decode_responses=True,
+        protocol=2,
+    )
+
+
+def _read_live_metrics():
+    """Redis 里没有 / 连不上 / 过期都返回 None，由调用方回退 CSV。"""
+    try:
+        data = _redis_client().hgetall(settings.LIVE_METRICS_KEY)
+    except Exception:  # noqa: BLE001 - 看板不能因为 Redis 挂了就 500
+        return None
+    return _parse_live_metrics(data)
+
+
+def _latest_metrics():
+    live = _read_live_metrics()
+    if live is not None:
+        return live
+    return _csv_metrics()
 
 
 @login_required
