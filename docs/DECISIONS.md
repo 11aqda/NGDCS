@@ -1720,7 +1720,11 @@ user | score | level | kills | created_at
 | `mode` | 对局模式（占位 / 游戏 / 实验） | Web 要能"只看游戏模式的成绩" |
 | `ruleset_version` | 规则版本号 | 数值改过之后，老成绩不能和新成绩混着排名 |
 | `boss_killed` | 是否击杀 BOSS | 区分"通关"和"中途阵亡"，这是个有意义的筛选维度 |
-| `duration_ms` | 单局时长（毫秒） | 分析"玩多久"、算平均单局时长 |
+| `duration_ms` | 单局时长（毫秒）；**`NULL` = 未记录** | 分析"玩多久"、算平均单局时长 |
+
+> **2026-11-14 补充**：`duration_ms` 用 **`NULL` 表示「未记录」**，不要用 `0` ——
+> `0 ms` 是一个有效值，混进"平均单局时长"会把统计拉偏。四个字段**暂不实现**：
+> 毕设代码已冻结在 `thesis-golden`，等做 BOSS 时在 `portfolio` 上一次加完（同一个 commit）。
 
 ### 为什么不在现在做
 
@@ -1743,7 +1747,7 @@ user | score | level | kills | created_at
 
 - [ ] 做 BOSS 那个 commit 时，一并给 `ScoreRecord` 加这四个字段 + migration
 - [ ] 默认值要能兼容历史数据（`mode` 默认占位、`ruleset_version` 默认 1、
-      `boss_killed` 默认 False、`duration_ms` 默认 0）
+      `boss_killed` 默认 False、`duration_ms` 默认 **NULL**，不要用 0）
 - [ ] 加完字段后，`accounts/tests.py` 要覆盖新字段的写入
 - [ ] 在 `docs/12-求职版Web规划.md` 里补一句"字段已就绪，可加筛选"
 
